@@ -13,6 +13,9 @@ COURTS_YS = {
 # 2. 송도 달빛공원 테니스장 URL
 URL_MOONLIGHT = "https://songdotennis.co.kr/songdo-tennis?tab=reservations"
 
+# 3. 새아침공원 테니스장 URL (인천시설공단)
+URL_NEW_MORNING = "https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07"
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
@@ -67,13 +70,10 @@ def get_available_slots():
         res = requests.get(URL_MOONLIGHT, headers=HEADERS, timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
-            
-            # 코트 단위 구역 또는 행 탐색
             elements = soup.find_all(text=lambda t: t and ("예약가능" in t or "신청" in t or "예약하기" in t))
             
             for elem in elements:
                 parent = elem.parent
-                # 부모 요소를 넓게 탐색하여 코트 번호 식별
                 container_text = ""
                 curr = parent
                 for _ in range(4):
@@ -83,7 +83,6 @@ def get_available_slots():
 
                 time_str = clean_time_format(container_text)
 
-                # "1코트", "A코트", "제1코트" 등 상세 코트 명칭 추출
                 court_match = re.search(r'(\d+코트|[A-Za-z]+코트|제\d+코트)', container_text)
                 if court_match:
                     court_label = f"달빛공원 {court_match.group(1)}"
@@ -99,5 +98,42 @@ def get_available_slots():
                 })
     except Exception as e:
         print(f"[달빛공원 테니스장] 조회 실패: {e}")
+
+    # --- [3] 새아침공원 테니스장 스크래핑 (인천시설공단) ---
+    try:
+        res_nm = requests.get(URL_NEW_MORNING, headers=HEADERS, timeout=10)
+        if res_nm.status_code == 200:
+            res_nm.encoding = res_nm.apparent_encoding or 'utf-8'
+            soup = BeautifulSoup(res_nm.text, "html.parser")
+
+            # 인천시설공단 예약 가능 버튼/항목 탐색
+            elements = soup.find_all(text=lambda t: t and ("신청가능" in t or "예약가능" in t or "신청" in t))
+
+            for elem in elements:
+                parent = elem.parent
+                container_text = ""
+                curr = parent
+                for _ in range(4):
+                    if curr:
+                        container_text += " " + curr.get_text(strip=True)
+                        curr = curr.parent
+
+                time_str = clean_time_format(container_text)
+
+                court_match = re.search(r'(\d+코트|[A-Za-z]+코트|제\d+코트|\d+번)', container_text)
+                if court_match:
+                    court_label = f"새아침공원 {court_match.group(1)}"
+                else:
+                    court_label = "새아침공원 테니스장"
+
+                available_slots.append({
+                    "court": court_label,
+                    "date": date_str,
+                    "time": time_str,
+                    "weekday_num": weekday_idx,
+                    "url": URL_NEW_MORNING
+                })
+    except Exception as e:
+        print(f"[새아침공원 테니스장] 조회 실패: {e}")
 
     return available_slots
