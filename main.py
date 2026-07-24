@@ -34,6 +34,27 @@ def is_target_slot(slot):
 
     return False
 
+def categorize_by_venue(slots):
+    """테니스장별로 슬롯 분류"""
+    venues = {
+        "연수문화공원": [],
+        "새아침공원": [],
+        "송도달빛공원": []
+    }
+    
+    for slot in slots:
+        court_name = slot.get("court", "")
+        if "연수문화" in court_name:
+            venues["연수문화공원"].append(slot)
+        elif "새아침" in court_name:
+            venues["새아침공원"].append(slot)
+        elif "달빛" in court_name:
+            venues["송도달빛공원"].append(slot)
+        else:
+            venues["연수문화공원"].append(slot)
+            
+    return venues
+
 def send_chunked_messages(header, slot_blocks, footer):
     """텔레그램 메시지 길이가 길 경우 나누어서 발송"""
     current_msg = header + "\n\n"
@@ -47,9 +68,10 @@ def send_chunked_messages(header, slot_blocks, footer):
     
     current_msg += footer
     send_telegram_message(current_msg)
+    time.sleep(1) # 장소별 발송 간격
 
 def test_send_current_all():
-    print("🧪 [테스트] 전체 스캔 실행 중...")
+    print("🧪 [테스트] 장소별 현황 스캔 및 발송 중...")
     slots = get_available_slots()
     target_slots = [s for s in slots if is_target_slot(s)]
 
@@ -58,17 +80,26 @@ def test_send_current_all():
     now = datetime.now(kst)
     now_str = now.strftime(f"%Y-%m-%d ({weekdays[now.weekday()]}) %H:%M:%S")
 
-    if target_slots:
-        header = f"📊 <b>[현재 예약 가능 코트 현황]</b> (총 {len(target_slots)}개)"
-        blocks = []
-        for slot in target_slots:
-            b = f"🎾 <b>{slot['court']}</b>\n📅 {slot['date']} {slot['time']}\n🔗 <a href='{slot['url']}'>예약하기</a>"
-            blocks.append(b)
-        footer = f"⏰ 조회 시간: {now_str}"
-        send_chunked_messages(header, blocks, footer)
-        print("✅ [테스트] 메시지 분할 전송 완료!")
-    else:
-        send_telegram_message(f"📊 <b>[현재 예약 가능 코트 현황]</b>\n\n💤 조건에 맞는 자리가 없습니다.\n\n⏰ {now_str}")
+    categorized = categorize_by_venue(target_slots)
+
+    for venue_name, venue_slots in categorized.items():
+        if venue_slots:
+            header = f"🏟️ <b>[{venue_name} 예약 가능 현황]</b> (총 {len(venue_slots)}개)"
+            blocks = []
+            for slot in venue_slots:
+                b = f"🎾 <b>{slot['court']}</b>\n📅 {slot['date']} {slot['time']}\n🔗 <a href='{slot['url']}'>예약하기</a>"
+                blocks.append(b)
+            footer = f"⏰ 조회 시간: {now_str}"
+            send_chunked_messages(header, blocks, footer)
+        else:
+            send_telegram_message(
+                f"🏟️ <b>[{venue_name} 예약 가능 현황]</b>\n\n"
+                f"💤 현재 조건(평일 20~22시/주말 전체)에 맞는 자리가 없습니다.\n\n"
+                f"⏰ 조회 시간: {now_str}"
+            )
+            time.sleep(1)
+
+    print("✅ [테스트] 장소별 메시지 독립 발송 완료!")
 
 def run_check():
     seen = load_seen()
@@ -82,16 +113,23 @@ def run_check():
     new_slots = [s for s in slots if is_target_slot(s) and f"{s['court']}_{s['date']}_{s['time']}" not in seen]
 
     if new_slots:
-        blocks = []
-        for slot in new_slots:
-            slot_key = f"{slot['court']}_{slot['date']}_{slot['time']}"
-            seen.add(slot_key)
-            b = f"🚨 <b>[NEW] {slot['court']} 취소표!</b>\n📅 {slot['date']} {slot['time']}\n🔗 <a href='{slot['url']}'>예약하기</a>"
-            blocks.append(b)
+        categorized = categorize_by_venue(new_slots)
 
-        header = f"🚨 <b>[신규 취소표 발생 알림]</b> (총 {len(new_slots)}개)"
-        footer = f"⏰ 알림 시간: {now_str}"
-        send_chunked_messages(header, blocks, footer)
+        for venue_name, venue_slots in categorized.items():
+            if not venue_slots:
+                continue
+
+            blocks = []
+            for slot in venue_slots:
+                slot_key = f"{slot['court']}_{slot['date']}_{slot['time']}"
+                seen.add(slot_key)
+                b = f"🚨 <b>[NEW] {slot['court']} 취소표!</b>\n📅 {slot['date']} {slot['time']}\n🔗 <a href='{slot['url']}'>예약하기</a>"
+                blocks.append(b)
+
+            header = f"🚨 <b>[{venue_name} 신규 취소표 발생!]</b> (총 {len(venue_slots)}개)"
+            footer = f"⏰ 알림 시간: {now_str}"
+            send_chunked_messages(header, blocks, footer)
+
         save_seen(seen)
 
 if __name__ == "__main__":
