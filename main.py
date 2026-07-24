@@ -2,10 +2,14 @@ import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
+
 from scraper import get_available_slots
 from telegram_bot import send_telegram_message
 
 SEEN_FILE = "seen.json"
+KST = timezone(timedelta(hours=9))
+WEEKDAYS_KO = ["월", "화", "수", "목", "금", "토", "일"]
+
 
 def load_seen():
     if os.path.exists(SEEN_FILE):
@@ -16,132 +20,105 @@ def load_seen():
             return set()
     return set()
 
+
 def save_seen(seen_set):
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(list(seen_set), f, ensure_ascii=False, indent=2)
 
-def is_target_slot(slot):
-    weekday = slot.get("weekday_num", 0)
-    time_str = slot.get("time", "")
 
-    # 주말 (토/일) -> 전체 허용
+def is_target_slot(slot):
+    """평일(월~금): 20~22시만 / 주말(토,일): 전체 시간 허용"""
+    weekday = slot.get("weekday_num", 0)  # 0=월 ... 6=일
+    time_str = slot.get("time", "")
     if weekday in [5, 6]:
         return True
-
-    # 평일 -> 20~22시 허용
-    if "20~22" in time_str or "20시" in time_str or "21시" in time_str:
+    if "20~22" in time_str:
         return True
-
     return False
 
-def categorize_by_venue(slots):
-    """테니스장별로 슬롯 분류"""
-    venues = {
-        "연수문화공원": [],
-        "새아침공원": [],
-        "송도달빛공원": []
-    }
-    
-    for slot in slots:
-        court_name = slot.get("court", "")
-        if "연수문화" in court_name:
-            venues["연수문화공원"].append(slot)
-        elif "새아침" in court_name:
-            venues["새아침공원"].append(slot)
-        elif "달빛" in court_name:
-            venues["송도달빛공원"].append(slot)
-        else:
-            venues["연수문화공원"].append(slot)
-            
-    return venues
 
-def send_chunked_messages(header, slot_blocks, footer):
-    """텔레그램 메시지 길이가 길 경우 나누어서 발송"""
-    current_msg = header + "\n\n"
-    for block in slot_blocks:
-        if len(current_msg) + len(block) + 200 > 3800:
-            send_telegram_message(current_msg)
+def now_str():
+    now = datetime.now(KST)
+    return now.strftime(f"%Y-%m-%d ({WEEKDAYS_KO[now.weekday()]}) %H:%M:%S")
+
+
+def send_chunked(header, blocks, footer):
+    """텔레그램 4000자 제한 대응: 길면 나눠서 전송"""
+    current = header + "\n\n"
+    for block in blocks:
+        if len(current) + len(block) + 200 > 3500:
+            send_telegram_message(current)
             time.sleep(0.5)
-            current_msg = "📊 <b>[이어서 계속...]</b>\n\n" + block + "\n\n"
+            current = "📊 <b>[이어서 계속]</b>\n\n" + block + "\n\n"
         else:
-            current_msg += block + "\n\n"
-    
-    current_msg += footer
-    send_telegram_message(current_msg)
-    time.sleep(1) # 장소별 발송 간격
+            current += block + "\n\n"
+    current += footer
+    send_telegram_message(current)
+
+
+def format_block(slot, tag="🎾"):
+    return (
+        f"{tag} <b>{slot['court']}</b>\n"
+        f"📅 {slot['date']} {slot['time']}\n"
+        f"🔗 <a href='{slot['url']}'>예약하기</a>"
+    )
+
 
 def test_send_current_all():
-    print("🧪 [테스트] 장소별 현황 스캔 및 발송 중...")
+    """봇 시작 시 현재 예약 가능한 전체 현황을 1회 발송 (동작 확인용)"""
+    print("🧪 [테스트] 현재 예약 가능 현황 스캔 중...")
     slots = get_available_slots()
-    target_slots = [s for s in slots if is_target_slot(s)]
+    targets = [s for s in slots if is_target_slot(s)]
 
-    weekdays = ["월", "화", "수", "목", "금", "토", "일"]
-    kst = timezone(timedelta(hours=9))
-    now = datetime.now(kst)
-    now_str = now.strftime(f"%Y-%m-%d ({weekdays[now.weekday()]}) %H:%M:%S")
+    if targets:
+        header = f"📊 <b>[현재 예약 가능 현황]</b> (총 {len(targets)}개)"
+        blocks = [format_block(s) for s in targets]
+        footer = f"⏰ 조회 시간: {now_str()}"
+        send_chunked(header, blocks, footer)
+    else:
+        send_telegram_message(
+            f"📊 <b>[현재 예약 가능 현황]</b>\n\n"
+            f"💤 조건(평일 20~22시 / 주말 전체)에 맞는 자리가 없습니다.\n\n"
+            f"⏰ 조회 시간: {now_str()}"
+        )
+    print("✅ [테스트] 발송 완료!")
 
-    categorized = categorize_by_venue(target_slots)
-
-    for venue_name, venue_slots in categorized.items():
-        if venue_slots:
-            header = f"🏟️ <b>[{venue_name} 예약 가능 현황]</b> (총 {len(venue_slots)}개)"
-            blocks = []
-            for slot in venue_slots:
-                b = f"🎾 <b>{slot['court']}</b>\n📅 {slot['date']} {slot['time']}\n🔗 <a href='{slot['url']}'>예약하기</a>"
-                blocks.append(b)
-            footer = f"⏰ 조회 시간: {now_str}"
-            send_chunked_messages(header, blocks, footer)
-        else:
-            send_telegram_message(
-                f"🏟️ <b>[{venue_name} 예약 가능 현황]</b>\n\n"
-                f"💤 현재 조건(평일 20~22시/주말 전체)에 맞는 자리가 없습니다.\n\n"
-                f"⏰ 조회 시간: {now_str}"
-            )
-            time.sleep(1)
-
-    print("✅ [테스트] 장소별 메시지 독립 발송 완료!")
 
 def run_check():
     seen = load_seen()
     slots = get_available_slots()
 
-    weekdays = ["월", "화", "수", "목", "금", "토", "일"]
-    kst = timezone(timedelta(hours=9))
-    now = datetime.now(kst)
-    now_str = now.strftime(f"%Y-%m-%d ({weekdays[now.weekday()]}) %H:%M:%S")
-
-    new_slots = [s for s in slots if is_target_slot(s) and f"{s['court']}_{s['date']}_{s['time']}" not in seen]
+    new_slots = []
+    for slot in slots:
+        if not is_target_slot(slot):
+            continue
+        key = f"{slot['court']}_{slot['date']}_{slot['time']}"
+        if key not in seen:
+            new_slots.append(slot)
+            seen.add(key)
 
     if new_slots:
-        categorized = categorize_by_venue(new_slots)
-
-        for venue_name, venue_slots in categorized.items():
-            if not venue_slots:
-                continue
-
-            blocks = []
-            for slot in venue_slots:
-                slot_key = f"{slot['court']}_{slot['date']}_{slot['time']}"
-                seen.add(slot_key)
-                b = f"🚨 <b>[NEW] {slot['court']} 취소표!</b>\n📅 {slot['date']} {slot['time']}\n🔗 <a href='{slot['url']}'>예약하기</a>"
-                blocks.append(b)
-
-            header = f"🚨 <b>[{venue_name} 신규 취소표 발생!]</b> (총 {len(venue_slots)}개)"
-            footer = f"⏰ 알림 시간: {now_str}"
-            send_chunked_messages(header, blocks, footer)
-
+        header = f"🚨 <b>[신규 취소표 발생!]</b> (총 {len(new_slots)}개)"
+        blocks = [format_block(s, tag="🚨") for s in new_slots]
+        footer = f"⏰ 알림 시간: {now_str()}"
+        send_chunked(header, blocks, footer)
         save_seen(seen)
+        print("📩 신규 알림 전송 완료!")
+    else:
+        print(f"💤 [{now_str()}] 새로운 자리 없음.")
+
 
 if __name__ == "__main__":
-    print("🚀 테니스장 모니터링 로봇 가동!")
+    print("🚀 연수문화공원/연수체육공원 테니스장 감시 로봇 시작!")
+
     try:
         test_send_current_all()
     except Exception as e:
-        print(f"⚠️ 테스트 전송 에러: {e}")
+        print(f"⚠️ 테스트 발송 에러: {e}")
 
     while True:
         try:
             run_check()
         except Exception as e:
-            print(f"⚠️ 실행 에러: {e}")
+            print(f"⚠️ 실행 중 에러: {e}")
         time.sleep(30)
