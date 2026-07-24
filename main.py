@@ -39,6 +39,39 @@ def is_target_slot(slot):
 
     return False
 
+def test_send_current_all():
+    """서버 시작 시 현재 예약 가능한 전체 현황을 텔레그램으로 1회 강제 발송"""
+    print("🧪 [테스트] 현재 예약 가능 현황 스캔 중...")
+    slots = get_available_slots()
+    target_slots = [s for s in slots if is_target_slot(s)]
+
+    weekdays = ["월", "화", "수", "목", "금", "토", "일"]
+    kst = timezone(timedelta(hours=9))
+    now = datetime.now(kst)
+    now_str = now.strftime(f"%Y-%m-%d ({weekdays[now.weekday()]}) %H:%M:%S")
+
+    if target_slots:
+        message_blocks = [f"📊 <b>[현재 예약 가능 코트 현황]</b> (총 {len(target_slots)}개)"]
+        for slot in target_slots:
+            block = (
+                f"🎾 <b>{slot['court']}</b>\n"
+                f"📅 {slot['date']} {slot['time']}\n"
+                f"🔗 <a href='{slot['url']}'>예약하기</a>"
+            )
+            message_blocks.append(block)
+
+        message_blocks.append(f"⏰ 조회 시간: {now_str}")
+        send_telegram_message("\n\n".join(message_blocks))
+        print("✅ [테스트] 현재 예약 가능한 전체 현황 발송 완료!")
+    else:
+        send_telegram_message(
+            f"📊 <b>[현재 예약 가능 코트 현황]</b>\n\n"
+            f"💤 현재 조건(평일 20~22시 / 주말)에 맞는 빈자리가 없습니다.\n\n"
+            f"⏰ 조회 시간: {now_str}\n"
+            f"💡 지금부터 30초 간격으로 취소표를 실시간 감시합니다!"
+        )
+        print("✅ [테스트] 빈자리 없음 현황 메시지 발송 완료!")
+
 def run_check():
     seen = load_seen()
     slots = get_available_slots()
@@ -64,13 +97,13 @@ def run_check():
 
         for slot in new_slots:
             block = (
-                f"🎾 {slot['court']} 예약가능!\n"
+                f"🚨 <b>[NEW] {slot['court']} 취소표 발생!</b>\n"
                 f"📅 {slot['date']} {slot['time']}\n"
                 f"🔗 <a href='{slot['url']}'>예약 페이지 바로가기</a>"
             )
             message_blocks.append(block)
 
-        footer = f"⏰ 현재 시간: {now_str}"
+        footer = f"⏰ 알림 시간: {now_str}"
         final_message = "\n\n".join(message_blocks) + "\n\n" + footer
         send_telegram_message(final_message)
 
@@ -80,10 +113,18 @@ def run_check():
         print("💤 조건에 맞는 새로운 예약 가능 내역이 없습니다.")
 
 if __name__ == "__main__":
-    print("🚀 테니스장(연수문화공원 + 달빛공원) 예약 감시 로봇 실행 중... (30초 간격 감시)")
+    print("🚀 테니스장(연수문화/달빛/새아침) 감시 로봇 시작")
+    
+    # 1. 시작하자마자 현재 전체 상태 텔레그램으로 1회 발송
+    try:
+        test_send_current_all()
+    except Exception as e:
+        print(f"⚠️ 테스트 전송 실패: {e}")
+
+    # 2. 이후 30초마다 새로운 취소표 감시 루프
     while True:
         try:
             run_check()
         except Exception as e:
             print(f"⚠️ 실행 중 오류 발생: {e}")
-        time.sleep(30)  # 30초 간격 감시
+        time.sleep(30)
