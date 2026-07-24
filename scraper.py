@@ -67,20 +67,28 @@ def get_available_slots():
         res = requests.get(URL_MOONLIGHT, headers=HEADERS, timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
-            # 예약 가능한 슬롯/버튼 요소 탐색
+            
+            # 코트 단위 구역 또는 행 탐색
             elements = soup.find_all(text=lambda t: t and ("예약가능" in t or "신청" in t or "예약하기" in t))
             
             for elem in elements:
                 parent = elem.parent
-                row_text = parent.get_text(strip=True) if parent else ""
-                time_str = clean_time_format(row_text)
+                # 부모 요소를 넓게 탐색하여 코트 번호 식별
+                container_text = ""
+                curr = parent
+                for _ in range(4):
+                    if curr:
+                        container_text += " " + curr.get_text(strip=True)
+                        curr = curr.parent
 
-                # 달빛공원 코트 기본 처리
-                court_label = "달빛공원 테니스장"
-                if "코트" in row_text:
-                    court_match = re.search(r'(\d+코트|[A-Z]코트)', row_text)
-                    if court_match:
-                        court_label = f"달빛공원 {court_match.group(1)}"
+                time_str = clean_time_format(container_text)
+
+                # "1코트", "A코트", "제1코트" 등 상세 코트 명칭 추출
+                court_match = re.search(r'(\d+코트|[A-Za-z]+코트|제\d+코트)', container_text)
+                if court_match:
+                    court_label = f"달빛공원 {court_match.group(1)}"
+                else:
+                    court_label = "달빛공원 테니스장"
 
                 available_slots.append({
                     "court": court_label,
