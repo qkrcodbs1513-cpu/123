@@ -64,26 +64,6 @@ def format_block(slot, tag="🎾"):
     )
 
 
-def test_send_current_all():
-    """봇 시작 시 현재 예약 가능한 전체 현황을 1회 발송 (동작 확인용)"""
-    print("🧪 [테스트] 현재 예약 가능 현황 스캔 중...")
-    slots = get_available_slots()
-    targets = [s for s in slots if is_target_slot(s)]
-
-    if targets:
-        header = f"📊 <b>[현재 예약 가능 현황]</b> (총 {len(targets)}개)"
-        blocks = [format_block(s) for s in targets]
-        footer = f"⏰ 조회 시간: {now_str()}"
-        send_chunked(header, blocks, footer)
-    else:
-        send_telegram_message(
-            f"📊 <b>[현재 예약 가능 현황]</b>\n\n"
-            f"💤 조건(평일 20~22시 / 주말 전체)에 맞는 자리가 없습니다.\n\n"
-            f"⏰ 조회 시간: {now_str()}"
-        )
-    print("✅ [테스트] 발송 완료!")
-
-
 def run_check():
     seen = load_seen()
     slots = get_available_slots()
@@ -108,13 +88,31 @@ def run_check():
         print(f"💤 [{now_str()}] 새로운 자리 없음.")
 
 
+def seed_seen_if_empty():
+    """
+    최초 실행(seen.json이 없을 때)에는 현재 존재하는 슬롯들을
+    '이미 본 것'으로 기록만 해두고 알림은 보내지 않는다.
+    이후부터는 새로 열리는 자리만 알림이 온다.
+    """
+    if os.path.exists(SEEN_FILE):
+        return
+    print("🌱 최초 실행: 현재 슬롯을 기준선으로 기록 중 (알림 없음)...")
+    slots = get_available_slots()
+    seen = set()
+    for s in slots:
+        if is_target_slot(s):
+            seen.add(f"{s['court']}_{s['date']}_{s['time']}")
+    save_seen(seen)
+    print(f"✅ 기준선 기록 완료 ({len(seen)}개). 지금부터 새 자리만 알림갑니다.")
+
+
 if __name__ == "__main__":
     print("🚀 연수문화공원/연수체육공원 테니스장 감시 로봇 시작!")
 
     try:
-        test_send_current_all()
+        seed_seen_if_empty()
     except Exception as e:
-        print(f"⚠️ 테스트 발송 에러: {e}")
+        print(f"⚠️ 초기화 에러: {e}")
 
     while True:
         try:
