@@ -1,0 +1,10 @@
+{
+    "bot_token": "8809590392:AAEbVr8nhDHjnmThBZ0Lcm3tETlk1LADTMc",
+    "chat_id": "8619378022",
+    "check_interval": 10,
+    "courts": [
+        "A",
+        "B",
+        "C"
+    ]
+}
