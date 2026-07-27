@@ -104,3 +104,5 @@ if __name__ == "__main__":
     slots = get_available_slots()
     for s in slots:
         print(s)
+
+print(unique)
