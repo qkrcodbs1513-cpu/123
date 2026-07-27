@@ -58,7 +58,7 @@ def _extract_slots(
     slots: list[dict[str, Any]] = []
     today = datetime.now(KST).date()
 
-    # '예약하기'라고 표시된 실제 신청 링크만 빈자리로 판단한다.
+    # 실제 '예약하기' 신청 링크만 빈자리로 판단합니다.
     for anchor in soup.find_all("a", href=True):
         href = anchor.get("href", "").strip()
         label = " ".join(anchor.get_text(" ", strip=True).split())
@@ -79,7 +79,7 @@ def _extract_slots(
             slot_date = datetime.strptime(date_value, "%Y-%m-%d").date()
             time_label, start_hour = _normalise_time(time_value)
         except (ValueError, TypeError):
-            print(f"⚠️ 해석할 수 없는 예약 링크: {full_url}", flush=True)
+            print(f"    ⚠️ 해석 불가 링크: {full_url}", flush=True)
             continue
 
         if slot_date < today:
@@ -107,11 +107,14 @@ def slot_key(slot: dict[str, Any]) -> str:
 
 
 def is_target_slot(slot: dict[str, Any]) -> bool:
-    """월~금은 20~22시만, 토·일은 모든 시간."""
-    return slot["weekday_num"] in (5, 6) or slot["start_hour"] == 20
+    """월~금은 20:00~22:00만, 토·일은 모든 시간."""
+    weekday_num = int(slot["weekday_num"])
+    start_hour = int(slot["start_hour"])
+    return weekday_num in (5, 6) or (weekday_num in (0, 1, 2, 3, 4) and start_hour == 20)
 
 
-def get_available_slots() -> list[dict[str, Any]]:
+def get_available_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
+    """빈자리와 코트별 조회 오류 목록을 함께 반환합니다."""
     session = requests.Session()
     session.headers.update(HEADERS)
     all_slots: list[dict[str, Any]] = []
@@ -137,30 +140,34 @@ def get_available_slots() -> list[dict[str, Any]]:
             all_slots.extend(slots)
             target_count = sum(1 for slot in slots if is_target_slot(slot))
             print(
-                f"🔎 {court_name}: 실제 빈자리 {len(slots)}개 / "
-                f"알림 조건 일치 {target_count}개 / HTTP {response.status_code}",
+                f"    ✅ {court_name}: 빈자리 {len(slots)}개 / 조건 일치 {target_count}개 / HTTP {response.status_code}",
                 flush=True,
             )
         except requests.RequestException as exc:
-            error = f"{court_name}: {exc}"
+            error = f"{court_name}: {type(exc).__name__} - {exc}"
             errors.append(error)
-            print(f"❌ 조회 실패 - {error}", flush=True)
-
-    if len(errors) == len(COURTS):
-        raise RuntimeError("A/B/C 코트 조회가 모두 실패했습니다: " + " | ".join(errors))
+            print(f"    ❌ {error}", flush=True)
 
     unique = {slot_key(slot): slot for slot in all_slots}
     result = sorted(
         unique.values(),
         key=lambda slot: (slot["date_raw"], slot["start_hour"], slot["court"]),
     )
-    return result
+    return result, errors
+
+
+def get_available_slots() -> list[dict[str, Any]]:
+    slots, errors = get_available_slots_with_status()
+    if len(errors) == len(COURTS):
+        raise RuntimeError("A/B/C 코트 조회가 모두 실패했습니다: " + " | ".join(errors))
+    return slots
 
 
 if __name__ == "__main__":
-    found = get_available_slots()
+    found, errors = get_available_slots_with_status()
     targets = [slot for slot in found if is_target_slot(slot)]
     print(f"📊 실제 빈자리 전체: {len(found)}개")
     print(f"🎯 알림 조건 일치: {len(targets)}개")
+    print(f"⚠️ 조회 오류 코트: {len(errors)}개")
     for item in targets:
         print(item)
