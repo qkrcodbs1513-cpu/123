@@ -9,13 +9,23 @@ from config import BOT_TOKEN, CHAT_ID
 _API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 
-def send_telegram_message(message: str, retries: int = 3) -> bool:
-    payload = {
+def send_telegram_message(
+    message: str,
+    retries: int = 3,
+    button_url: str | None = None,
+    button_text: str = "📲 예약하기",
+) -> bool:
+    payload: dict[str, object] = {
         "chat_id": CHAT_ID,
         "text": message,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+
+    if button_url:
+        payload["reply_markup"] = {
+            "inline_keyboard": [[{"text": button_text, "url": button_url}]]
+        }
 
     last_error: Optional[str] = None
     for attempt in range(1, retries + 1):
