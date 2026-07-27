@@ -57,38 +57,44 @@ def get_available_slots():
         "Referer": "https://www.ysfsmc.or.kr/"
     }
 
-    # 연수문화공원 A, B, C 코트
     courts_ys = {
         "연수문화공원 A코트": "1",
         "연수문화공원 B코트": "2",
         "연수문화공원 C코트": "3"
     }
 
-    for court_name, seq in courts_ys.items():
-        for t in target_dates:
-            try:
-                url = f"https://www.ysfsmc.or.kr/business/culture/park_tennis2.jsp?tennis_seq={seq}&sYear={t['year']}&sMonth={t['month']}&sDay={t['day']}"
-                res = session.get(url, headers=headers, timeout=8)
-                if res.status_code == 200:
-                    soup = BeautifulSoup(res.text, "html.parser")
-                    # 예약 가능 상태 검색
-                    rows = soup.find_all("tr")
-                    for r in rows:
-                        text = r.get_text(" ", strip=True)
-                        if any(k in text for k in ["신청", "예약", "가능"]) and not any(k in text for k in ["불가", "마감", "완료"]):
-                            if any(c in text for c in [":", "시", "~"]):
-                                time_str = clean_time_format(text)
-                                available_slots.append({
-                                    "court": court_name,
-                                    "date": t["date_str"],
-                                    "time": time_str,
-                                    "weekday_num": t["weekday_num"],
-                                    "url": url
-                                })
-            except Exception as e:
-                print(f"❌ [{court_name}] {t['date_str']} 에러: {e}")
+    # 📌 park_tennis2_1.jsp, 2_2.jsp, 2_3.jsp 페이지 목록
+    page_suffixes = ["2_1", "2_2", "2_3"]
 
-    # 중복 제거
+    for page_suffix in page_suffixes:
+        for court_name, seq in courts_ys.items():
+            for t in target_dates:
+                try:
+                    url = f"https://www.ysfsmc.or.kr/business/culture/park_tennis{page_suffix}.jsp?tennis_seq={seq}&sYear={t['year']}&sMonth={t['month']}&sDay={t['day']}"
+                    res = session.get(url, headers=headers, timeout=8)
+                    
+                    if res.status_code == 200:
+                        soup = BeautifulSoup(res.text, "html.parser")
+                        rows = soup.find_all("tr")
+                        
+                        for r in rows:
+                            text = r.get_text(" ", strip=True)
+                            
+                            # '신청', '예약', '가능' 키워드가 있고 마감/불가가 아닌 경우
+                            if any(k in text for k in ["신청", "예약", "가능"]) and not any(k in text for k in ["불가", "마감", "완료", "불가능"]):
+                                if any(c in text for c in [":", "시", "~"]):
+                                    time_str = clean_time_format(text)
+                                    available_slots.append({
+                                        "court": court_name,
+                                        "date": t["date_str"],
+                                        "time": time_str,
+                                        "weekday_num": t["weekday_num"],
+                                        "url": url
+                                    })
+                except Exception as e:
+                    print(f"❌ [{court_name}] {page_suffix} - {t['date_str']} 에러: {e}")
+
+    # 중복 제거 (여러 페이지에서 동일한 시간표가 잡힐 가능성 방지)
     unique_slots = []
     seen_keys = set()
     for s in available_slots:
@@ -97,5 +103,5 @@ def get_available_slots():
             seen_keys.add(k)
             unique_slots.append(s)
 
-    print(f"📊 [연수문화공원 스캔 완료] 총 슬롯 수: {len(unique_slots)}개")
+    print(f"📊 [연수문화공원 전체 2_1,2_2,2_3 스캔 완료] 총 슬롯 수: {len(unique_slots)}개")
     return unique_slots
