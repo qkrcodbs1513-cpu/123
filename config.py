@@ -1,14 +1,33 @@
+from __future__ import annotations
+
 import os
+from pathlib import Path
+
+
+def _int_env(name: str, default: int, minimum: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        return max(minimum, int(raw))
+    except ValueError as exc:
+        raise RuntimeError(f"{name} 환경변수는 정수여야 합니다: {raw!r}") from exc
+
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 
-# Railway Variables에서 숫자만 바꾸면 바로 반영됩니다.
-CHECK_INTERVAL = max(30, int(os.getenv("CHECK_INTERVAL", "30")))
-HEARTBEAT_HOURS = max(1, int(os.getenv("HEARTBEAT_HOURS", "6")))
-REQUEST_TIMEOUT = max(5, int(os.getenv("REQUEST_TIMEOUT", "20")))
-ERROR_ALERT_MINUTES = max(1, int(os.getenv("ERROR_ALERT_MINUTES", "5")))
-REOPEN_URGENT_SECONDS = max(30, int(os.getenv("REOPEN_URGENT_SECONDS", "90")))
+CHECK_INTERVAL = _int_env("CHECK_INTERVAL", 30, 15)
+HEARTBEAT_HOURS = _int_env("HEARTBEAT_HOURS", 6, 1)
+REQUEST_TIMEOUT = _int_env("REQUEST_TIMEOUT", 20, 5)
+ERROR_ALERT_MINUTES = _int_env("ERROR_ALERT_MINUTES", 5, 1)
+TELEGRAM_POLL_TIMEOUT = _int_env("TELEGRAM_POLL_TIMEOUT", 25, 5)
+
+DATA_DIR = Path(os.getenv("DATA_DIR", ".")).resolve()
+STATE_FILE = DATA_DIR / os.getenv("STATE_FILE", "bot_state.json")
+SETTINGS_FILE = DATA_DIR / os.getenv("SETTINGS_FILE", "bot_settings.json")
+
+DEFAULT_COURTS = ["A", "B", "C"]
+DEFAULT_WEEKDAY_HOURS = [20]
+DEFAULT_WEEKEND_HOURS: list[int] | None = None  # None = 모든 시간
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN 환경변수가 없습니다. Railway Variables에 등록하세요.")

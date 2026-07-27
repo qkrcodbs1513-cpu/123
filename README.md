@@ -1,28 +1,41 @@
-# ChaenissBot v4
+# ChaenissBot v5
 
-연수문화공원 테니스장 A/B/C의 실제 `예약하기` 링크를 감시합니다.
+연수문화공원 테니스장 A/B/C 빈자리를 확인하고 Telegram으로 알려주는 봇입니다.
 
-- 평일: 20:00~22:00만 알림
-- 토·일: 모든 시간 알림
-- 30초마다 확인
-- 신규 빈자리 1건당 Telegram 카드 + 예약 버튼
-- 사라진 뒤 다시 열린 빈자리 재알림
-- 빠르게 재등장한 빈자리는 긴급 표시
-- 6시간마다 정상 작동 알림
-- 오늘 신규 알림 건수와 연속 가동시간 표시
-- 사이트 오류가 5분 이상 지속되면 알림
-- 정상 복구 시 알림
-- Railway 로그를 A/B/C 조건 일치 수 중심으로 간단히 표시
+## 포함 기능
+
+- 30초 간격 감시
+- 신규 빈자리 1회 알림
+- 빈자리가 닫혔다 다시 열리면 재알림
+- 오류 지속 및 정상 복구 알림
+- 감시 루프/명령 루프 자동 재시작
+- 상태 파일 원자적 저장 및 백업 복구
+- A/B/C 코트 선택
+- 평일/주말 시간 설정
+- Telegram `/settings`, `/status`, `/stats`, `/check`, `/help`
+- Telegram 버튼으로 설정 변경
+- 검사/알림/오류/복구 통계
+- Railway 재시작 정책 파일 포함
 
 ## Railway Variables
 
-- `BOT_TOKEN`: 새 Telegram Bot Token
-- `CHAT_ID`: Telegram Chat ID
-- `CHECK_INTERVAL`: `30`
-- `HEARTBEAT_HOURS`: `6`
-- `ERROR_ALERT_MINUTES`: `5`
-- `REQUEST_TIMEOUT`: `20`
-- `REOPEN_URGENT_SECONDS`: `90`
-- `TZ`: `Asia/Seoul`
+필수:
 
-Start Command는 `python main.py`입니다.
+- `BOT_TOKEN`
+- `CHAT_ID`
+
+선택:
+
+- `CHECK_INTERVAL=30`
+- `HEARTBEAT_HOURS=6`
+- `ERROR_ALERT_MINUTES=5`
+- `REQUEST_TIMEOUT=20`
+- `TELEGRAM_POLL_TIMEOUT=25`
+
+## 주의
+
+Railway의 기본 디스크는 재배포 때 초기화될 수 있습니다. 완전한 영구 상태 보존이 필요하면 Railway Volume을 연결하고 `DATA_DIR`를 그 경로로 지정하세요.
+
+예:
+- Volume mount path: `/data`
+- Variable: `DATA_DIR=/data`
