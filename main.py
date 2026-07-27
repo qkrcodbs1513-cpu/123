@@ -4,11 +4,11 @@ import argparse
 import json
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from config import CHECK_INTERVAL, HEARTBEAT_HOURS
+from config import CHECK_INTERVAL, HEARTBEAT_HOUR
 from scraper import get_available_slots, is_target_slot, slot_key
 from telegram_bot import escape, send_telegram_message
 
@@ -49,16 +49,16 @@ def target_slots(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [slot for slot in slots if is_target_slot(slot)]
 
 
-def slot_block(slot: dict[str, Any], icon: str = "🎾") -> str:
+def slot_block(slot: dict[str, Any]) -> str:
     return (
-        f"{icon} <b>{escape(slot['court'])}</b>\n"
+        f"🎾 <b>{escape(slot['court'])}</b>\n"
         f"📅 {escape(slot['date'])}\n"
         f"🕐 {escape(slot['time'])}\n"
-        f"🔗 <a href=\"{escape(slot['url'])}\">바로 예약하기</a>"
+        f"🔗 <a href=\"{escape(slot['url'])}\">예약 페이지 바로 열기</a>"
     )
 
 
-def send_blocks(header: str, slots: list[dict[str, Any]], footer: str) -> bool:
+def send_slot_messages(header: str, slots: list[dict[str, Any]], footer: str) -> bool:
     messages: list[str] = []
     current = header + "\n\n"
 
@@ -76,10 +76,10 @@ def send_blocks(header: str, slots: list[dict[str, Any]], footer: str) -> bool:
 
 
 def fetch_targets() -> list[dict[str, Any]]:
-    slots = get_available_slots()
-    targets = target_slots(slots)
+    all_slots = get_available_slots()
+    targets = target_slots(all_slots)
     print(
-        f"✅ 검사 완료: 전체 빈자리 {len(slots)}개 / "
+        f"✅ 검사 완료: 실제 빈자리 {len(all_slots)}개 / "
         f"알림 조건 일치 {len(targets)}개 / {now_str()}",
         flush=True,
     )
@@ -88,18 +88,18 @@ def fetch_targets() -> list[dict[str, Any]]:
 
 def send_startup_report(targets: list[dict[str, Any]]) -> None:
     if targets:
-        send_blocks(
-            f"🟢 <b>ChaenissBot Railway 감시 시작</b>\n"
-            f"현재 조건 일치 빈자리: {len(targets)}개",
+        send_slot_messages(
+            "🟢 <b>ChaenissBot 시작 또는 재시작</b>\n"
+            f"현재 알림 조건 일치 빈자리: {len(targets)}개",
             targets,
             f"⏰ 확인 시간: {now_str()}\n"
             f"🔁 검사 주기: {CHECK_INTERVAL}초",
         )
     else:
         send_telegram_message(
-            "🟢 <b>ChaenissBot Railway 감시 시작</b>\n\n"
+            "🟢 <b>ChaenissBot 시작 또는 재시작</b>\n\n"
             "현재 조건에 맞는 빈자리는 0개입니다.\n"
-            "평일 20~22시 / 주말 모든 시간을 계속 확인합니다.\n\n"
+            "평일 20~22시 / 주말 전 시간을 계속 확인합니다.\n\n"
             f"⏰ 확인 시간: {now_str()}\n"
             f"🔁 검사 주기: {CHECK_INTERVAL}초"
         )
@@ -111,7 +111,6 @@ def run_once(previous_keys: set[str] | None) -> tuple[set[str], int]:
     current_keys = set(current_map)
 
     if previous_keys is None:
-        # 최초 배포/재배포 때 현재 상태를 전송해서 봇이 제대로 읽는지 확인 가능.
         send_startup_report(targets)
         save_current_keys(current_keys)
         return current_keys, 0
@@ -120,7 +119,7 @@ def run_once(previous_keys: set[str] | None) -> tuple[set[str], int]:
     newly_opened = [current_map[key] for key in sorted(newly_opened_keys)]
 
     if newly_opened:
-        send_blocks(
+        send_slot_messages(
             f"🚨 <b>연수문화공원 신규 빈자리 {len(newly_opened)}개!</b>",
             newly_opened,
             f"⏰ 발견 시간: {now_str()}",
@@ -129,16 +128,20 @@ def run_once(previous_keys: set[str] | None) -> tuple[set[str], int]:
     else:
         print("💤 새로 생긴 조건 일치 빈자리 없음", flush=True)
 
-    # 현재 예약 가능 목록으로 매번 교체한다.
-    # 따라서 사라졌다가 다시 열린 자리는 다시 신규로 감지된다.
+    # 닫힌 자리는 목록에서 제거되므로, 나중에 다시 열리면 신규 알림이 다시 간다.
     save_current_keys(current_keys)
     return current_keys, len(newly_opened)
+
+
+def should_send_daily_heartbeat(last_date: date | None) -> bool:
+    now = now_kst()
+    return now.hour >= HEARTBEAT_HOUR and last_date != now.date()
 
 
 def monitor() -> None:
     print("🚀 연수문화공원 A/B/C 감시 시작", flush=True)
     previous_keys = load_previous_keys()
-    last_heartbeat = now_kst()
+    last_heartbeat_date: date | None = None
     consecutive_errors = 0
 
     while True:
@@ -147,25 +150,24 @@ def monitor() -> None:
             previous_keys, _ = run_once(previous_keys)
             consecutive_errors = 0
 
-            if now_kst() - last_heartbeat >= timedelta(hours=HEARTBEAT_HOURS):
+            if should_send_daily_heartbeat(last_heartbeat_date):
                 send_telegram_message(
                     "💚 <b>ChaenissBot 정상 작동 중</b>\n\n"
                     f"마지막 검사: {now_str()}\n"
                     f"현재 조건 일치 빈자리: {len(previous_keys)}개\n"
                     f"검사 주기: {CHECK_INTERVAL}초"
                 )
-                last_heartbeat = now_kst()
+                last_heartbeat_date = now_kst().date()
         except Exception as exc:
             consecutive_errors += 1
             print(f"⚠️ 검사 오류 ({consecutive_errors}회 연속): {exc}", flush=True)
-            # 일시적인 사이트 오류는 계속 재시도하고, 반복 오류는 Telegram으로 알린다.
             if consecutive_errors in (3, 10) or consecutive_errors % 30 == 0:
                 send_telegram_message(
-                    "⚠️ <b>ChaenissBot 조회 오류</b>\n\n"
+                    "⚠️ <b>ChaenissBot 사이트 조회 오류</b>\n\n"
                     f"연속 오류: {consecutive_errors}회\n"
                     f"내용: {escape(exc)}\n"
                     f"시간: {now_str()}\n\n"
-                    "프로세스는 종료하지 않고 자동 재시도합니다."
+                    "봇은 종료하지 않고 계속 자동 재시도합니다."
                 )
 
         elapsed = time.monotonic() - cycle_started
@@ -174,13 +176,13 @@ def monitor() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--once", action="store_true", help="한 번만 조회하고 종료")
-    parser.add_argument("--test-telegram", action="store_true", help="텔레그램 연결만 테스트")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--test-telegram", action="store_true")
     args = parser.parse_args()
 
     if args.test_telegram:
         ok = send_telegram_message(
-            f"✅ <b>ChaenissBot 텔레그램 테스트 성공</b>\n{now_str()}"
+            f"✅ <b>ChaenissBot 텔레그램 연결 정상</b>\n{now_str()}"
         )
         raise SystemExit(0 if ok else 1)
 

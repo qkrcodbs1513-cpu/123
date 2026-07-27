@@ -1,6 +1,6 @@
-__pycache__/
-*.pyc
-.env
 config.json
 current_slots.json
 seen.json
+__pycache__/
+*.pyc
+.env
