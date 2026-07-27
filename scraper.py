@@ -106,3 +106,10 @@ if __name__ == "__main__":
         print(s)
 
 print(unique)
+
+res = session.get(url, headers=HEADERS, timeout=10)
+
+print("=" * 50)
+print(court_name, ym)
+print("예약하기" in res.text)
+print("tennisApplyRegForm.do" in res.text)
