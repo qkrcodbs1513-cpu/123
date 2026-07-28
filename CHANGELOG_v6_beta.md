@@ -33,3 +33,13 @@
 - 클릭 전/후 URL, 목록으로 버튼, 코트명, 날짜 버튼 개수 검증
 - 실패 단계별 HTML/스크린샷 저장(컨테이너 내부 진단용)
 - 검증되지 않은 진단 버전이며 예약 수집 성공을 보장하지 않음
+
+
+## v6.1.9 RESERVATION-ENTRY
+- Prime Reserve 메인에서 `예약` 메뉴를 실제 클릭하도록 진입 흐름 수정
+- button뿐 아니라 link, tab, role=button, 정확한 텍스트 후보를 순차 탐색
+- 후보별 태그·role·href·aria-label·가시성·활성 상태를 Railway 로그로 출력
+- 일반 클릭 실패 시 force 클릭을 추가로 시도
+- `domcontentloaded` 뒤 `networkidle` 및 Prime Reserve 앱 셸 렌더링 대기
+- 클릭 후 반드시 5번·14번 코트 존재 여부로 예약 목록 진입 검증
+- 아직 실제 Railway 환경에서 검증 전인 진단 수정본

@@ -116,54 +116,178 @@ def _list_has_target_courts(page: Any) -> bool:
     return "5번 코트" in body_text and "14번 코트" in body_text
 
 
-def _click_reservation_tab(page: Any) -> None:
-    candidates = page.get_by_role("button", name="예약", exact=True)
-    for i in range(candidates.count()):
-        button = candidates.nth(i)
+def _element_summary(element: Any) -> str:
+    """예약 메뉴 후보의 태그·속성을 짧게 로그로 남깁니다."""
+    try:
+        return element.evaluate(
+            """el => JSON.stringify({
+                tag: el.tagName,
+                text: (el.innerText || el.textContent || '').trim(),
+                role: el.getAttribute('role'),
+                href: el.getAttribute('href'),
+                aria: el.getAttribute('aria-label'),
+                dataState: el.getAttribute('data-state'),
+                className: typeof el.className === 'string' ? el.className : ''
+            })"""
+        )
+    except Exception:
+        return "{}"
+
+
+def _reservation_candidates(page: Any) -> list[tuple[str, Any]]:
+    """Prime Reserve의 실제 태그를 가정하지 않고 예약 메뉴 후보를 모읍니다."""
+    locators = [
+        ("role=button", page.get_by_role("button", name="예약", exact=True)),
+        ("role=link", page.get_by_role("link", name="예약", exact=True)),
+        ("role=tab", page.get_by_role("tab", name="예약", exact=True)),
+        ("text", page.get_by_text("예약", exact=True)),
+        ("css-a", page.locator("a", has_text="예약")),
+        ("css-role-tab", page.locator('[role="tab"]', has_text="예약")),
+        ("css-role-button", page.locator('[role="button"]', has_text="예약")),
+    ]
+    found: list[tuple[str, Any]] = []
+    seen: set[str] = set()
+    for source, locator in locators:
         try:
-            if button.is_visible(timeout=200) and button.is_enabled(timeout=200):
-                button.click(timeout=1500)
-                return
+            count = locator.count()
         except Exception:
             continue
+        for i in range(count):
+            item = locator.nth(i)
+            try:
+                key = item.evaluate("el => el.tagName + '|' + (el.outerHTML || '')")[:700]
+            except Exception:
+                key = f"{source}:{i}"
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append((source, item))
+    return found
 
 
-def _ensure_list(page: Any, timeout_ms: int = 20000) -> None:
-    """목록/상세를 판별한 뒤 5~14번 코트 목록이 보이는 상태를 만듭니다."""
+def _click_reservation_tab(page: Any) -> bool:
+    """메인 화면의 예약 메뉴를 실제 클릭하고 성공 여부를 반환합니다."""
+    candidates = _reservation_candidates(page)
+    _log(f"예약 메뉴 후보 {len(candidates)}개 발견")
+
+    for index, (source, item) in enumerate(candidates, start=1):
+        try:
+            visible = item.is_visible(timeout=300)
+        except Exception:
+            visible = False
+        try:
+            enabled = item.is_enabled(timeout=300)
+        except Exception:
+            enabled = True
+        _log(
+            f"[예약메뉴 {index}] source={source} visible={visible} enabled={enabled} "
+            f"element={_compact(_element_summary(item), 500)}"
+        )
+        if not visible or not enabled:
+            continue
+
+        before_url = page.url
+        try:
+            item.scroll_into_view_if_needed(timeout=1500)
+        except Exception:
+            pass
+        try:
+            item.click(timeout=4000)
+        except Exception as exc:
+            _log(f"[예약메뉴 {index}] 일반 클릭 실패: {type(exc).__name__}: {exc}")
+            try:
+                item.click(timeout=3000, force=True)
+            except Exception as force_exc:
+                _log(f"[예약메뉴 {index}] 강제 클릭 실패: {type(force_exc).__name__}: {force_exc}")
+                continue
+
+        page.wait_for_timeout(800)
+        _log(
+            f"[예약메뉴 {index}] 클릭 완료: url_changed={before_url != page.url} "
+            f"url={page.url}"
+        )
+        if _poll(page, lambda: _list_has_target_courts(page), 8000):
+            _log(f"[예약메뉴 {index}] 코트 목록 진입 확인")
+            return True
+
+        # 클릭은 됐지만 목록이 안 떴다면 다음 후보도 시도합니다.
+        try:
+            body = _compact(page.locator("body").inner_text(timeout=1000), 500)
+        except Exception:
+            body = ""
+        _log(f"[예약메뉴 {index}] 클릭 후 목록 미확인, body={body!r}")
+
+    return False
+
+
+def _wait_for_app_shell(page: Any, timeout_ms: int = 15000) -> None:
+    """Prime Reserve 앱의 기본 메뉴가 렌더링될 때까지 기다립니다."""
+    def ready() -> bool:
+        try:
+            body = page.locator("body").inner_text(timeout=800)
+            return "Prime Reserve" in body and "예약" in body
+        except Exception:
+            return False
+
+    if _poll(page, ready, timeout_ms):
+        _log("Prime Reserve 앱 셸 확인")
+    else:
+        _log("Prime Reserve 앱 셸 대기 시간 초과 — 현재 DOM으로 계속 진단")
+
+
+def _goto_songdo(page: Any) -> None:
+    _log(f"예약 URL 접속: {SONGDO_URL}")
+    page.goto(SONGDO_URL, wait_until="domcontentloaded")
+    try:
+        page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        _log("networkidle 대기 시간 초과 — SPA 렌더링 폴링으로 계속")
+    _wait_for_app_shell(page)
+
+
+def _ensure_list(page: Any, timeout_ms: int = 30000) -> None:
+    """Prime Reserve 메인/상세 어느 상태에서든 달빛공원 코트 목록으로 진입합니다."""
     if _is_detail(page):
         _log("상세 화면 감지 — 목록으로 복귀")
         back = page.locator('button[aria-label="목록으로"]')
         try:
             back.first.click(timeout=4000)
         except Exception as exc:
-            _log(f"목록으로 버튼 클릭 실패({type(exc).__name__}) — URL 재접속")
-            page.goto(SONGDO_URL, wait_until="domcontentloaded")
+            _log(f"목록으로 버튼 클릭 실패({type(exc).__name__}) — 예약 URL 재접속")
+            _goto_songdo(page)
 
     if _poll(page, lambda: _list_has_target_courts(page), 5000):
+        _log("기존 화면에서 코트 목록 확인")
         return
 
-    # 예약 탭이 아닌 경우에만 탭 클릭을 시도합니다.
-    _click_reservation_tab(page)
-    if _poll(page, lambda: _list_has_target_courts(page), timeout_ms - 5000):
+    _wait_for_app_shell(page, timeout_ms=8000)
+    _log("메인 화면에서 예약 메뉴 클릭 시도")
+    if _click_reservation_tab(page):
         return
 
-    # SPA 상태가 꼬였을 때 마지막으로 URL을 새로 열고 다시 확인합니다.
-    _log("목록 미확인 — 예약 URL 재접속")
-    page.goto(SONGDO_URL, wait_until="domcontentloaded")
-    page.wait_for_timeout(1200)
+    # 첫 진입의 SPA 상태가 불완전했을 수 있으므로 새 문서에서 한 번 더 검증합니다.
+    _log("첫 예약 메뉴 진입 실패 — 새로 접속 후 재시도")
+    _goto_songdo(page)
     if _is_detail(page):
         try:
             page.locator('button[aria-label="목록으로"]').first.click(timeout=4000)
         except Exception:
             pass
-    _click_reservation_tab(page)
-    if not _poll(page, lambda: _list_has_target_courts(page), timeout_ms):
-        try:
-            current = page.url
-            snippet = " ".join(page.locator("body").inner_text(timeout=1000).split())[:300]
-        except Exception:
-            current, snippet = page.url, ""
-        raise RuntimeError(f"코트 목록을 확인하지 못했습니다. url={current} body={snippet!r}")
+    if _poll(page, lambda: _list_has_target_courts(page), 3000):
+        return
+    if _click_reservation_tab(page):
+        return
+
+    try:
+        current = page.url
+        snippet = _compact(page.locator("body").inner_text(timeout=1000), 700)
+        candidate_count = len(_reservation_candidates(page))
+    except Exception:
+        current, snippet, candidate_count = page.url, "", -1
+    raise RuntimeError(
+        "코트 목록을 확인하지 못했습니다. "
+        f"url={current} 예약메뉴후보={candidate_count} body={snippet!r}"
+    )
 
 
 def _exact_visible_text(page: Any, text: str) -> Any | None:
@@ -391,7 +515,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.1.8 CLICK-PROBE 진단 시작 — 5~14번 전체 코트")
+        _log("v6.1.9 RESERVATION-ENTRY 진단 시작 — Prime Reserve 예약 메뉴 실제 클릭")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
@@ -402,9 +526,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
             page = context.new_page()
             page.set_default_timeout(REQUEST_TIMEOUT * 1000)
 
-            _log(f"페이지 접속: {SONGDO_URL}")
-            page.goto(SONGDO_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(1200)
+            _goto_songdo(page)
             _ensure_list(page)
             _log("코트 목록 확인 완료")
 
@@ -438,8 +560,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
                         _ensure_list(page, timeout_ms=10000)
                     except Exception:
                         try:
-                            page.goto(SONGDO_URL, wait_until="domcontentloaded")
-                            page.wait_for_timeout(1000)
+                            _goto_songdo(page)
                         except Exception:
                             pass
 
