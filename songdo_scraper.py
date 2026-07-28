@@ -187,35 +187,134 @@ def _court_card(page: Any, court_num: int) -> Any | None:
     return card if card.count() > 0 else None
 
 
-def _open_court(page: Any, court_num: int) -> None:
+def _compact(value: str, limit: int = 500) -> str:
+    return " ".join((value or "").split())[:limit]
+
+
+def _describe_buttons(locator: Any, limit: int = 12) -> list[str]:
+    rows: list[str] = []
+    try:
+        count = locator.count()
+    except Exception:
+        return rows
+    for i in range(min(count, limit)):
+        button = locator.nth(i)
+        try:
+            text = _compact(button.inner_text(timeout=300), 80)
+        except Exception:
+            text = ""
+        try:
+            aria = button.get_attribute("aria-label") or ""
+        except Exception:
+            aria = ""
+        try:
+            title = button.get_attribute("title") or ""
+        except Exception:
+            title = ""
+        try:
+            disabled = button.is_disabled(timeout=200)
+        except Exception:
+            disabled = None
+        try:
+            visible = button.is_visible(timeout=200)
+        except Exception:
+            visible = None
+        rows.append(
+            f"#{i} text={text!r} aria={aria!r} title={title!r} "
+            f"visible={visible} disabled={disabled}"
+        )
+    return rows
+
+
+def _open_court(page: Any, court_num: int, debug_dir: Path) -> None:
+    court_text = f"{court_num}번 코트"
+    _log(f"[{court_num}번][1] 카드 탐색 시작, url={page.url}")
+
+    title = _exact_visible_text(page, court_text)
+    if title is None:
+        body = _compact(page.locator("body").inner_text(timeout=1000), 700)
+        _log(f"[{court_num}번][FAIL] 코트명 텍스트 없음, body={body!r}")
+        _save_debug(page, debug_dir, f"probe_{court_num}_title_missing")
+        raise RuntimeError("코트명 텍스트를 찾지 못했습니다.")
+
+    try:
+        tag = title.evaluate("el => el.tagName")
+    except Exception:
+        tag = "?"
+    _log(f"[{court_num}번][2] 코트명 발견: tag={tag}")
+
+    # 코트명 주변 DOM을 로그에 남겨 실제 카드 구조를 확인합니다.
+    try:
+        parent_html = title.evaluate(
+            "el => (el.closest('article,li,section,[role=\"listitem\"]') || el.parentElement || el).outerHTML"
+        )
+        _log(f"[{court_num}번][DOM] 주변 HTML={_compact(parent_html, 900)!r}")
+    except Exception as exc:
+        _log(f"[{court_num}번][DOM] 주변 HTML 수집 실패: {type(exc).__name__}")
+
     card = _court_card(page, court_num)
     if card is None:
+        # 기존 선택자가 실패했을 때 페이지 전체 예약 버튼 현황을 출력합니다.
+        for row in _describe_buttons(page.locator("button")):
+            _log(f"[{court_num}번][BUTTON] {row}")
+        _save_debug(page, debug_dir, f"probe_{court_num}_card_missing")
         raise RuntimeError("코트 카드를 찾지 못했습니다.")
 
-    reserve_buttons = card.get_by_role("button", name="예약", exact=True)
+    _log(f"[{court_num}번][3] 기존 카드 선택자 발견")
+    reserve_buttons = card.locator("button")
+    descriptions = _describe_buttons(reserve_buttons)
+    _log(f"[{court_num}번][4] 카드 내부 버튼 {reserve_buttons.count()}개")
+    for row in descriptions:
+        _log(f"[{court_num}번][BUTTON] {row}")
+
     reserve = None
     for i in range(reserve_buttons.count()):
         candidate = reserve_buttons.nth(i)
         try:
-            if candidate.is_visible(timeout=250) and candidate.is_enabled(timeout=250):
-                reserve = candidate
-                break
+            text = _compact(candidate.inner_text(timeout=300), 50)
+            aria = (candidate.get_attribute("aria-label") or "").strip()
+            # '예약'이 포함된 활성 버튼을 우선 사용합니다.
+            if "예약" in text or "예약" in aria:
+                if candidate.is_visible(timeout=250) and candidate.is_enabled(timeout=250):
+                    reserve = candidate
+                    break
         except Exception:
             continue
+
     if reserve is None:
-        raise RuntimeError("활성화된 예약 버튼을 찾지 못했습니다.")
+        _save_debug(page, debug_dir, f"probe_{court_num}_no_enabled_button")
+        raise RuntimeError("카드 안에서 활성화된 예약 버튼을 찾지 못했습니다.")
 
-    reserve.scroll_into_view_if_needed(timeout=1500)
-    reserve.click(timeout=4000)
+    _save_debug(page, debug_dir, f"probe_{court_num}_before_click")
+    _log(f"[{court_num}번][5] 예약 버튼 클릭 직전")
+    before_url = page.url
+    reserve.scroll_into_view_if_needed(timeout=2000)
+    try:
+        reserve.click(timeout=5000)
+        _log(f"[{court_num}번][6] Playwright 클릭 명령 성공")
+    except Exception as exc:
+        _log(f"[{court_num}번][FAIL] 클릭 예외: {type(exc).__name__}: {exc}")
+        _save_debug(page, debug_dir, f"probe_{court_num}_click_exception")
+        raise
 
-    def detail_ready() -> bool:
-        if not _is_detail(page):
-            return False
-        title = _exact_visible_text(page, f"{court_num}번 코트")
-        return title is not None and page.locator("button[data-date-key]").count() > 0
+    page.wait_for_timeout(800)
+    after_url = page.url
+    detail = _is_detail(page)
+    title_after = _exact_visible_text(page, court_text) is not None
+    date_count = page.locator("button[data-date-key]").count()
+    _log(
+        f"[{court_num}번][7] 클릭 후 검증: url_changed={before_url != after_url}, "
+        f"detail_back_button={detail}, court_title={title_after}, date_buttons={date_count}, "
+        f"url={after_url}"
+    )
+    _save_debug(page, debug_dir, f"probe_{court_num}_after_click")
 
-    if not _poll(page, detail_ready, 12000):
-        raise RuntimeError("상세 화면 또는 날짜 버튼이 나타나지 않았습니다.")
+    if not (detail and title_after and date_count > 0):
+        body = _compact(page.locator("body").inner_text(timeout=1000), 900)
+        _log(f"[{court_num}번][FAIL] 상세 검증 실패, body={body!r}")
+        raise RuntimeError("클릭 후 상세 화면 검증에 실패했습니다.")
+
+    _log(f"[{court_num}번][OK] 상세 진입 확인 완료")
 
 
 def _available_dates(page: Any) -> list[tuple[str, int, int]]:
@@ -292,7 +391,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.1.7 STATE-AWARE 실제 DOM 수집 시작 — 5~14번 전체 코트")
+        _log("v6.1.8 CLICK-PROBE 진단 시작 — 5~14번 전체 코트")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
@@ -313,7 +412,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
                 try:
                     _ensure_list(page)
                     _log(f"{court_num}번: 상세 화면 진입 시도")
-                    _open_court(page, court_num)
+                    _open_court(page, court_num, debug_dir)
 
                     dates = _available_dates(page)
                     _log(f"{court_num}번: 예약 가능 날짜 {len(dates)}개")

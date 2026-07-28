@@ -26,3 +26,10 @@
 ## Railway build fix
 - Python base image pinned to `python:3.12-slim-bookworm`.
 - Fixes Playwright dependency installation failure caused by unavailable `ttf-unifont` packages on newer Debian images.
+
+
+## v6.1.8 CLICK-PROBE
+- 코트명 탐색, 카드 DOM, 카드 내부 버튼 상태를 Railway 로그로 출력
+- 클릭 전/후 URL, 목록으로 버튼, 코트명, 날짜 버튼 개수 검증
+- 실패 단계별 HTML/스크린샷 저장(컨테이너 내부 진단용)
+- 검증되지 않은 진단 버전이며 예약 수집 성공을 보장하지 않음
