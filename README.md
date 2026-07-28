@@ -26,7 +26,7 @@
 ## 달빛공원 선택 Variables
 
 - `SONGDO_ENABLED=false` — 처음부터 켜려면 `true`
-- `SONGDO_COURTS=6,7,8` — 비워두면 화면에서 발견한 모든 코트
+- 달빛공원은 5~14번 코트를 모두 고정 감시합니다. (`SONGDO_COURTS` 값과 무관)
 - `SONGDO_AUTH_STATE` — 로그인 상태 JSON 문자열 또는 Railway Volume의 JSON 파일 경로
 - `SONGDO_DEBUG_DIR=/data/songdo_debug` — 분석 파일 저장 경로
 

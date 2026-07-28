@@ -1,4 +1,4 @@
-"""달빛공원 예약 페이지 수집기(DOM NOCLICK v6.1).
+"""달빛공원 예약 페이지 수집기(ENABLED-CLICK v6.1.2 ALLCOURTS).
 
 - Playwright 단계별 로그 출력
 - 전체 수집 시간 제한
@@ -127,7 +127,6 @@ def _walk(value: Any) -> Iterable[dict[str, Any]]:
 
 def _parse_ws_slots(payloads: list[Any], fallback_date: str) -> list[dict[str, Any]]:
     slots: list[dict[str, Any]] = []
-    configured = set(SONGDO_COURTS)
     for payload in payloads:
         for item in _walk(payload):
             keys = set(item)
@@ -146,7 +145,7 @@ def _parse_ws_slots(payloads: list[Any], fallback_date: str) -> list[dict[str, A
             if not court_match:
                 continue
             court_num = court_match.group(0)
-            if configured and court_num not in configured:
+            if court_num not in {str(n) for n in range(5, 15)}:
                 continue
             date_raw = _normalise_date(str(item.get("date", ""))) or fallback_date
             slots.append(_slot(court_num, date_raw, start // 60, start % 60, end // 60, end % 60))
@@ -168,7 +167,7 @@ def _collect_worker(queue: Any) -> None:
         return
 
     try:
-        _log(f"NOCLICK v6.1 수집 시작: {SONGDO_URL}")
+        _log(f"ENABLED-CLICK v6.1.2 ALLCOURTS 수집 시작: {SONGDO_URL}")
         with sync_playwright() as p:
             _log("Chromium 실행")
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -208,94 +207,82 @@ def _collect_worker(queue: Any) -> None:
             date_raw = _normalise_date(body_text) or datetime.now(KST).strftime("%Y-%m-%d")
             _log(f"화면 기준 날짜: {date_raw}")
 
-            configured = set(SONGDO_COURTS)
-            _log("코트 버튼 클릭 없이 DOM 상태 읽기")
+            # 달빛공원 코트는 5~14번을 전부 확인합니다.
+            target_courts = [str(n) for n in range(5, 15)]
+            _log("5~14번 코트의 활성화된 예약 버튼만 클릭해 시간표 확인")
 
-            # 시간 표시가 들어간 실제 인터랙션 요소를 읽고, 가장 가까운 상위
-            # 카드에서 코트 번호를 찾습니다. disabled 요소는 예약 불가로 처리합니다.
-            dom_rows = page.evaluate(r"""
-                () => {
-                  const timeRe = /(?:^|\s)(\d{1,2}):(\d{2})\s*[-~–]\s*(\d{1,2}):(\d{2})(?:\s|$)/;
-                  const courtRe = /(\d{1,2})\s*번\s*코트/;
-                  const rows = [];
-                  const nodes = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+            def read_current_slots(court_num: str) -> list[dict[str, Any]]:
+                current_text = page.locator("body").inner_text(timeout=3000)
+                current_date = _normalise_date(current_text) or date_raw
+                found = _extract_visible_slots(page, court_num, current_date)
+                _log(f"{court_num}번 시간표 DOM 후보 {len(found)}개")
+                return found
 
-                  for (const node of nodes) {
-                    const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
-                    const tm = text.match(timeRe);
-                    if (!tm) continue;
+            list_url = page.url
+            for court_num in target_courts:
+                try:
+                    # 코트명 요소에서 가장 가까운 '예약' 버튼 포함 카드로 올라갑니다.
+                    court_name = page.get_by_text(re.compile(fr"^\s*{court_num}\s*번\s*코트\s*$")).first
+                    if court_name.count() == 0:
+                        _log(f"{court_num}번: 코트 카드를 찾지 못함")
+                        continue
+                    card = court_name.locator(
+                        "xpath=ancestor::*[.//button[contains(normalize-space(.), '예약')]][1]"
+                    )
+                    if card.count() == 0:
+                        _log(f"{court_num}번: 예약 버튼이 포함된 카드를 찾지 못함")
+                        continue
+                    reserve = card.locator("button").filter(has_text=re.compile(r"^\s*예약\s*$")).first
+                    if reserve.count() == 0:
+                        _log(f"{court_num}번: 예약 버튼 없음")
+                        continue
+                    disabled = reserve.is_disabled(timeout=800)
+                    aria_disabled = reserve.get_attribute("aria-disabled") == "true"
+                    if disabled or aria_disabled:
+                        _log(f"{court_num}번: 예약 버튼 비활성 — 클릭하지 않음")
+                        continue
 
-                    let court = null;
-                    let parent = node;
-                    for (let depth = 0; depth < 10 && parent; depth++, parent = parent.parentElement) {
-                      const parentText = (parent.innerText || '').replace(/\s+/g, ' ').trim();
-                      const matches = [...parentText.matchAll(new RegExp(courtRe.source, 'g'))];
-                      const unique = [...new Set(matches.map(m => m[1]))];
-                      if (unique.length === 1) {
-                        court = unique[0];
-                        break;
-                      }
-                    }
+                    _log(f"{court_num}번: 활성 예약 버튼 클릭")
+                    reserve.click(timeout=3000)
+                    page.wait_for_timeout(1800)
+                    slots.extend(read_current_slots(court_num))
 
-                    const disabled = Boolean(
-                      node.disabled ||
-                      node.getAttribute('disabled') !== null ||
-                      node.getAttribute('aria-disabled') === 'true' ||
-                      node.classList.contains('disabled')
-                    );
-                    rows.push({
-                      court,
-                      text,
-                      disabled,
-                      tag: node.tagName,
-                      cls: node.className || ''
-                    });
-                  }
-                  return rows;
-                }
-            """)
+                    # 상세 화면/모달에서 추가 WebSocket 데이터가 들어오도록 잠시 기다립니다.
+                    page.wait_for_timeout(700)
 
-            _log(f"시간 인터랙션 요소 {len(dom_rows)}개 발견")
-            for row in dom_rows[:80]:
-                court_num = str(row.get("court") or "")
-                text = str(row.get("text") or "")
-                disabled = bool(row.get("disabled"))
-                if not court_num:
-                    _log(f"코트 미확인 | {'불가' if disabled else '활성'} | {text[:80]}")
-                    continue
-                if configured and court_num not in configured:
-                    continue
-                _log(f"{court_num}번 | {'예약불가' if disabled else '예약가능 후보'} | {text[:80]}")
-                slot = _slot_from_text(court_num, date_raw, text, disabled)
-                if slot:
-                    slots.append(slot)
-
-            # 인터랙션 요소에 시간이 없는 사이트를 위한 보조 진단입니다.
-            # 코트명이 표시된 카드별 전체 문구를 저장하되, 여기서는 예약 가능으로
-            # 단정하지 않습니다. Railway 로그를 통해 실제 DOM 구조를 확인할 수 있습니다.
-            card_rows = page.evaluate(r"""
-                () => {
-                  const courtRe = /(\d{1,2})\s*번\s*코트/;
-                  const seen = new Set();
-                  const rows = [];
-                  const all = Array.from(document.querySelectorAll('body *'));
-                  for (const el of all) {
-                    const own = (el.innerText || '').replace(/\s+/g, ' ').trim();
-                    const m = own.match(courtRe);
-                    if (!m || own.length > 500) continue;
-                    const key = m[1] + '|' + own;
-                    if (seen.has(key)) continue;
-                    seen.add(key);
-                    rows.push({court: m[1], text: own});
-                  }
-                  return rows.slice(0, 100);
-                }
-            """)
-            for row in card_rows:
-                court_num = str(row.get("court") or "")
-                if configured and court_num not in configured:
-                    continue
-                _log(f"DOM 카드 {court_num}번: {str(row.get('text') or '')[:180]}")
+                    # 다음 코트를 위해 목록 화면으로 복귀합니다.
+                    returned = False
+                    for label in ("닫기", "이전", "뒤로", "목록"):
+                        try:
+                            btn = page.get_by_role("button", name=re.compile(fr"^\s*{label}\s*$")).first
+                            if btn.count() and not btn.is_disabled(timeout=300):
+                                btn.click(timeout=1000)
+                                page.wait_for_timeout(700)
+                                returned = True
+                                break
+                        except Exception:
+                            pass
+                    if not returned and page.url != list_url:
+                        try:
+                            page.go_back(wait_until="domcontentloaded", timeout=5000)
+                            page.wait_for_timeout(900)
+                            returned = True
+                        except Exception:
+                            pass
+                    if not returned:
+                        # 모달 구조가 불명확하면 목록 URL을 다시 열어 안전하게 복귀합니다.
+                        page.goto(SONGDO_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
+                        page.wait_for_timeout(1500)
+                        list_url = page.url
+                except Exception as exc:
+                    errors.append(f"달빛공원 {court_num}번 코트: {type(exc).__name__} - {exc}")
+                    _log(f"{court_num}번 처리 오류: {type(exc).__name__} - {exc}")
+                    try:
+                        page.goto(SONGDO_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
+                        page.wait_for_timeout(1200)
+                        list_url = page.url
+                    except Exception:
+                        pass
 
             _log("WebSocket 추가 데이터 대기 3초")
             page.wait_for_timeout(3000)
@@ -322,7 +309,7 @@ def _collect_worker(queue: Any) -> None:
 
 def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     """별도 프로세스에서 수집하여 무한 대기를 방지합니다."""
-    timeout_seconds = max(35, REQUEST_TIMEOUT * 3)
+    timeout_seconds = max(120, REQUEST_TIMEOUT * 8)
     ctx = mp.get_context("fork")
     queue = ctx.Queue()
     process = ctx.Process(target=_collect_worker, args=(queue,), daemon=True)
