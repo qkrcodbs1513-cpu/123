@@ -716,16 +716,15 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
                             page.wait_for_timeout(300)
                             found = _extract_times(page, court_num, date_raw)
 
-# ★ 추가: 실제 추출된 시간 확인
-for s in found:
-    _log(
-        f"[TIME] {court_num}번 {date_raw} | "
-        f"{s['time']} | start_hour={s['start_hour']}"
-    )
+                            # 실제 추출된 시간대를 확인하기 위한 진단 로그
+                            for slot in found:
+                                _log(
+                                    f"[TIME] {court_num}번 {date_raw} | "
+                                    f"{slot['time']} | start_hour={slot['start_hour']}"
+                                )
 
-slots.extend(found)
-
-_log(f"{court_num}번 {date_raw}: {available}/{total}, 시간 슬롯 {len(found)}개")
+                            slots.extend(found)
+                            _log(f"{court_num}번 {date_raw}: {available}/{total}, 시간 슬롯 {len(found)}개")
                         except Exception as exc:
                             error = f"달빛공원 {court_num}번 {date_raw}: {type(exc).__name__} - {exc}"
                             errors.append(error)
