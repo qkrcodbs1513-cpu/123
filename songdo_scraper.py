@@ -413,15 +413,39 @@ def _open_court(page: Any, court_num: int, debug_dir: Path) -> None:
     _log(f"[{court_num}번][5] 예약 버튼 클릭 직전")
     before_url = page.url
     reserve.scroll_into_view_if_needed(timeout=2000)
-    try:
-        reserve.click(timeout=5000)
-        _log(f"[{court_num}번][6] Playwright 클릭 명령 성공")
-    except Exception as exc:
-        _log(f"[{court_num}번][FAIL] 클릭 예외: {type(exc).__name__}: {exc}")
-        _save_debug(page, debug_dir, f"probe_{court_num}_click_exception")
-        raise
 
-    page.wait_for_timeout(800)
+    # Prime Reserve의 SPA 버튼은 클릭 이벤트 직후 DOM이 교체되면서
+    # Playwright가 클릭 완료를 기다리다가 TimeoutError를 낼 수 있습니다.
+    # 따라서 클릭 예외 자체를 실패로 단정하지 않고 상세 화면 진입 여부를 먼저 검증합니다.
+    click_error: Exception | None = None
+    try:
+        reserve.click(timeout=2500, no_wait_after=True)
+        _log(f"[{court_num}번][6A] Playwright 클릭 명령 반환")
+    except Exception as exc:
+        click_error = exc
+        _log(f"[{court_num}번][6A] Playwright 클릭 예외(진입 여부 계속 확인): {type(exc).__name__}: {exc}")
+
+    entered = _poll(
+        page,
+        lambda: _is_detail(page) and page.locator("button[data-date-key]").count() > 0,
+        5000,
+    )
+
+    if not entered:
+        _log(f"[{court_num}번][6B] 일반 클릭 후 상세 미확인 — DOM click() 대체 시도")
+        try:
+            reserve.evaluate("el => el.click()")
+            _log(f"[{court_num}번][6B] DOM click() 실행 완료")
+        except Exception as exc:
+            _log(f"[{court_num}번][6B] DOM click() 예외: {type(exc).__name__}: {exc}")
+
+        entered = _poll(
+            page,
+            lambda: _is_detail(page) and page.locator("button[data-date-key]").count() > 0,
+            7000,
+        )
+
+    page.wait_for_timeout(300)
     after_url = page.url
     detail = _is_detail(page)
     title_after = _exact_visible_text(page, court_text) is not None
@@ -515,7 +539,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.1.9 RESERVATION-ENTRY 진단 시작 — Prime Reserve 예약 메뉴 실제 클릭")
+        _log("v6.1.10 CLICK-FALLBACK 진단 시작 — Prime Reserve 예약 메뉴 실제 클릭")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}

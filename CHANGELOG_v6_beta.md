@@ -43,3 +43,11 @@
 - `domcontentloaded` 뒤 `networkidle` 및 Prime Reserve 앱 셸 렌더링 대기
 - 클릭 후 반드시 5번·14번 코트 존재 여부로 예약 목록 진입 검증
 - 아직 실제 Railway 환경에서 검증 전인 진단 수정본
+
+
+## v6.1.10 CLICK-FALLBACK
+- 예약 버튼 클릭 TimeoutError를 즉시 실패로 처리하지 않고 상세 진입 여부를 먼저 검증
+- Playwright 일반 클릭에 `no_wait_after=True` 적용
+- 일반 클릭 후 상세 미진입 시 DOM `click()` 대체 시도
+- 클릭 후 `목록으로` 버튼과 날짜 버튼이 실제 나타날 때까지 폴링
+- 검증되지 않은 진단 버전이며 실제 예약 슬롯 수집 성공을 보장하지 않음
