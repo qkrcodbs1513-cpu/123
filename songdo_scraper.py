@@ -520,34 +520,51 @@ def _visible_date_keys(page: Any) -> list[str]:
 
 
 def _date_nav_candidates(page: Any) -> list[Any]:
-    """날짜 선택 영역 안의 '다음 날짜' 버튼 후보를 우선순위대로 반환합니다."""
-    first_date = page.locator("button[data-date-key]").first
+    """달력 상단의 오른쪽(다음 달) 화살표 버튼 후보를 반환합니다."""
+    # 날짜 셀의 가장 가까운 조상은 달력 본문만 포함해 상단 화살표가 빠질 수 있습니다.
+    # 따라서 먼저 ``2026년 7월`` 같은 월 제목을 찾고, 월 제목과 날짜 셀을 함께
+    # 포함하는 조상 달력 전체를 탐색합니다.
+    scope = None
     try:
-        if first_date.count() == 0:
-            return []
+        month_label = page.get_by_text(re.compile(r"\d{4}년\s*\d{1,2}월")).first
+        if month_label.count() > 0 and month_label.is_visible(timeout=300):
+            calendar = month_label.locator(
+                "xpath=ancestor::*[count(.//button[@data-date-key]) >= 2][1]"
+            )
+            if calendar.count() > 0:
+                scope = calendar
     except Exception:
-        return []
+        scope = None
 
-    # 날짜 버튼 여러 개를 포함하는 가장 가까운 조상 영역을 찾습니다.
-    try:
-        container = first_date.locator(
-            "xpath=ancestor::*[count(.//button[@data-date-key]) >= 2][1]"
-        )
-        scope = container if container.count() > 0 else page.locator("body")
-    except Exception:
-        scope = page.locator("body")
+    if scope is None:
+        first_date = page.locator("button[data-date-key]").first
+        try:
+            if first_date.count() == 0:
+                return []
+            # fallback은 날짜 본문보다 넓은 조상을 선택하도록 2단계 위쪽을 우선합니다.
+            calendar = first_date.locator(
+                "xpath=ancestor::*[count(.//button[@data-date-key]) >= 2][last()]"
+            )
+            scope = calendar if calendar.count() > 0 else page.locator("body")
+        except Exception:
+            scope = page.locator("body")
 
     buttons = scope.locator("button:not([data-date-key])")
-    scored: list[tuple[int, int, Any]] = []
+    scored: list[tuple[int, float, int, Any]] = []
     try:
         count = buttons.count()
+        scope_box = scope.bounding_box()
+        scope_center_x = (
+            scope_box["x"] + scope_box["width"] / 2 if scope_box else 0.0
+        )
     except Exception:
         count = 0
+        scope_center_x = 0.0
 
     for i in range(count):
         button = buttons.nth(i)
         try:
-            if not button.is_visible(timeout=120) or button.is_disabled(timeout=120):
+            if not button.is_visible(timeout=150) or button.is_disabled(timeout=150):
                 continue
             aria = (button.get_attribute("aria-label") or "").strip().lower()
             title = (button.get_attribute("title") or "").strip().lower()
@@ -557,22 +574,29 @@ def _date_nav_candidates(page: Any) -> list[Any]:
             if "목록으로" in blob or "닫기" in blob or "close" in blob:
                 continue
 
+            box = button.bounding_box()
+            x = box["x"] + box["width"] / 2 if box else 0.0
             score = 0
-            if any(token in blob for token in ("다음", "next", "chevron-right", "arrow-right", "angle-right")):
-                score += 100
+            if any(token in blob for token in (
+                "다음", "next", "chevron-right", "arrow-right", "angle-right"
+            )):
+                score += 200
             if text in {">", "›", "→", "»"}:
-                score += 90
+                score += 180
             if "right" in blob:
-                score += 50
-            # 날짜 영역의 아이콘 전용 버튼은 보통 이전/다음 순서이므로 뒤쪽 버튼을 우선합니다.
+                score += 100
+            # 스크린샷 구조처럼 월 제목 오른쪽에 있는 아이콘 버튼을 강하게 우선합니다.
+            if x > scope_center_x:
+                score += 80
             if not text:
-                score += 10
-            scored.append((score, i, button))
+                score += 20
+            scored.append((score, x, i, button))
         except Exception:
             continue
 
-    scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
-    return [row[2] for row in scored]
+    # 같은 점수라면 달력에서 가장 오른쪽에 있는 버튼이 다음 달 화살표입니다.
+    scored.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
+    return [row[3] for row in scored]
 
 
 def _click_next_date_page(page: Any, court_num: int) -> bool:
@@ -621,7 +645,7 @@ def _collect_court_dates_and_times(
     court_num: int,
     slots: list[dict[str, Any]],
     errors: list[str],
-    max_pages: int = 5,
+    max_pages: int = 2,
 ) -> None:
     """현재 묶음뿐 아니라 다음 날짜 묶음까지 순회하여 주말도 수집합니다."""
     seen_dates: set[str] = set()
@@ -911,7 +935,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.1.16 WEEKEND-PAGING 시작 — 다음 날짜 묶음까지 순회")
+        _log("v6.1.17 AUGUST-ARROW 시작 — 달력 오른쪽 화살표로 다음 달 순회")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
