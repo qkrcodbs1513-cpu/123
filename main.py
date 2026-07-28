@@ -243,7 +243,9 @@ def monitor_loop() -> None:
                 all_slots.extend(yeonsu_slots)
                 errors.extend(yeonsu_errors)
             if settings["songdo_enabled"]:
+                log("INFO", "달빛공원 수집 시작")
                 songdo_slots, songdo_errors = get_songdo_slots_with_status()
+                log("INFO", f"달빛공원 수집 종료: 가능 슬롯 {len(songdo_slots)}개, 오류 {len(songdo_errors)}개")
                 all_slots.extend(songdo_slots)
                 errors.extend(songdo_errors)
             if errors:
