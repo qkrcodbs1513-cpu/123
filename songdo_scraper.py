@@ -497,6 +497,178 @@ def _available_dates(page: Any) -> list[tuple[str, int, int]]:
     return found
 
 
+
+def _visible_date_keys(page: Any) -> list[str]:
+    """현재 날짜 페이지에 보이는 날짜 키를 정렬해 반환합니다."""
+    keys: list[str] = []
+    buttons = page.locator("button[data-date-key]")
+    try:
+        count = buttons.count()
+    except Exception:
+        return keys
+    for i in range(count):
+        button = buttons.nth(i)
+        try:
+            if not button.is_visible(timeout=150):
+                continue
+            key = (button.get_attribute("data-date-key") or "").strip()
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", key):
+                keys.append(key)
+        except Exception:
+            continue
+    return sorted(set(keys))
+
+
+def _date_nav_candidates(page: Any) -> list[Any]:
+    """날짜 선택 영역 안의 '다음 날짜' 버튼 후보를 우선순위대로 반환합니다."""
+    first_date = page.locator("button[data-date-key]").first
+    try:
+        if first_date.count() == 0:
+            return []
+    except Exception:
+        return []
+
+    # 날짜 버튼 여러 개를 포함하는 가장 가까운 조상 영역을 찾습니다.
+    try:
+        container = first_date.locator(
+            "xpath=ancestor::*[count(.//button[@data-date-key]) >= 2][1]"
+        )
+        scope = container if container.count() > 0 else page.locator("body")
+    except Exception:
+        scope = page.locator("body")
+
+    buttons = scope.locator("button:not([data-date-key])")
+    scored: list[tuple[int, int, Any]] = []
+    try:
+        count = buttons.count()
+    except Exception:
+        count = 0
+
+    for i in range(count):
+        button = buttons.nth(i)
+        try:
+            if not button.is_visible(timeout=120) or button.is_disabled(timeout=120):
+                continue
+            aria = (button.get_attribute("aria-label") or "").strip().lower()
+            title = (button.get_attribute("title") or "").strip().lower()
+            text = " ".join((button.inner_text(timeout=200) or "").split()).lower()
+            html = (button.inner_html(timeout=250) or "").lower()
+            blob = " ".join((aria, title, text, html))
+            if "목록으로" in blob or "닫기" in blob or "close" in blob:
+                continue
+
+            score = 0
+            if any(token in blob for token in ("다음", "next", "chevron-right", "arrow-right", "angle-right")):
+                score += 100
+            if text in {">", "›", "→", "»"}:
+                score += 90
+            if "right" in blob:
+                score += 50
+            # 날짜 영역의 아이콘 전용 버튼은 보통 이전/다음 순서이므로 뒤쪽 버튼을 우선합니다.
+            if not text:
+                score += 10
+            scored.append((score, i, button))
+        except Exception:
+            continue
+
+    scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return [row[2] for row in scored]
+
+
+def _click_next_date_page(page: Any, court_num: int) -> bool:
+    """다음 날짜 묶음으로 이동합니다. 실제 날짜 키가 앞으로 바뀐 경우만 성공입니다."""
+    _close_overlay(page, f"{court_num}번 다음 날짜 전")
+    before = _visible_date_keys(page)
+    if not before:
+        return False
+    before_max = max(before)
+
+    candidates = _date_nav_candidates(page)
+    _log(f"{court_num}번: 다음 날짜 버튼 후보 {len(candidates)}개")
+    for index, button in enumerate(candidates, start=1):
+        try:
+            summary = _compact(_element_summary(button), 260)
+            _log(f"{court_num}번: 다음 날짜 후보 #{index} {summary}")
+            _dom_click(button)
+        except Exception:
+            continue
+
+        changed = _poll(
+            page,
+            lambda: bool(_visible_date_keys(page)) and _visible_date_keys(page) != before,
+            2500,
+            step_ms=150,
+        )
+        after = _visible_date_keys(page)
+        if changed and after and max(after) > before_max:
+            _log(f"{court_num}번: 다음 날짜 이동 성공 {before} → {after}")
+            return True
+
+        # 잘못된 후보로 이전 페이지로 이동했다면 같은 버튼을 다시 눌러 원위치 시도를 합니다.
+        if after and max(after) < before_max:
+            try:
+                _dom_click(button)
+                _poll(page, lambda: _visible_date_keys(page) == before, 1800, step_ms=150)
+            except Exception:
+                pass
+
+    _log(f"{court_num}번: 더 이상 다음 날짜 페이지 없음")
+    return False
+
+
+def _collect_court_dates_and_times(
+    page: Any,
+    court_num: int,
+    slots: list[dict[str, Any]],
+    errors: list[str],
+    max_pages: int = 5,
+) -> None:
+    """현재 묶음뿐 아니라 다음 날짜 묶음까지 순회하여 주말도 수집합니다."""
+    seen_dates: set[str] = set()
+    seen_pages: set[tuple[str, ...]] = set()
+
+    for page_index in range(1, max_pages + 1):
+        page_keys = tuple(_visible_date_keys(page))
+        if not page_keys or page_keys in seen_pages:
+            break
+        seen_pages.add(page_keys)
+
+        dates = _available_dates(page)
+        _log(
+            f"{court_num}번: 날짜 페이지 {page_index} {list(page_keys)} | "
+            f"예약 가능 날짜 {len(dates)}개"
+        )
+
+        for date_raw, available, total in dates:
+            if date_raw in seen_dates:
+                continue
+            seen_dates.add(date_raw)
+            try:
+                _close_overlay(page, f"{court_num}번 {date_raw} 전")
+                date_button = page.locator(f'button[data-date-key="{date_raw}"]').first
+                if date_button.count() == 0 or not date_button.is_visible(timeout=300):
+                    raise RuntimeError("현재 날짜 페이지에서 날짜 버튼을 찾지 못했습니다.")
+                _log(f"{court_num}번 {date_raw}: 날짜 DOM click() 시도")
+                _dom_click(date_button)
+                page.wait_for_timeout(300)
+                found = _extract_times(page, court_num, date_raw)
+                slots.extend(found)
+                _log(
+                    f"{court_num}번 {date_raw}: {available}/{total}, "
+                    f"시간 슬롯 {len(found)}개"
+                )
+            except Exception as exc:
+                error = f"달빛공원 {court_num}번 {date_raw}: {type(exc).__name__} - {exc}"
+                errors.append(error)
+                _log(f"[DATE-ERROR] {error}")
+            finally:
+                _close_overlay(page, f"{court_num}번 {date_raw} 후")
+
+        if page_index >= max_pages or not _click_next_date_page(page, court_num):
+            break
+
+    _log(f"{court_num}번: 전체 날짜 순회 완료 — 확인 날짜 {len(seen_dates)}개")
+
 def _extract_times(page: Any, court_num: int, date_raw: str) -> list[dict[str, Any]]:
     """선택한 날짜 뒤 화면에 나타난 정확한 2시간 슬롯만 추출합니다.
 
@@ -739,7 +911,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.1.15 FLEX-TIME 진단 시작 — 모달 여부와 무관하게 정확한 2시간 슬롯만 수집")
+        _log("v6.1.16 WEEKEND-PAGING 시작 — 다음 날짜 묶음까지 순회")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
@@ -760,25 +932,9 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
                     _log(f"{court_num}번: 상세 화면 진입 시도")
                     _open_court(page, court_num, debug_dir)
 
-                    dates = _available_dates(page)
-                    _log(f"{court_num}번: 예약 가능 날짜 {len(dates)}개")
-                    for date_raw, available, total in dates:
-                        try:
-                            # 이전 날짜에서 열린 모달이 남아 있으면 먼저 닫습니다.
-                            _close_overlay(page, f"{court_num}번 {date_raw} 전")
-                            date_button = page.locator(f'button[data-date-key="{date_raw}"]').first
-                            _log(f"{court_num}번 {date_raw}: 날짜 DOM click() 시도")
-                            _dom_click(date_button)
-                            page.wait_for_timeout(300)
-                            found = _extract_times(page, court_num, date_raw)
-                            slots.extend(found)
-                            _log(f"{court_num}번 {date_raw}: {available}/{total}, 시간 슬롯 {len(found)}개")
-                        except Exception as exc:
-                            error = f"달빛공원 {court_num}번 {date_raw}: {type(exc).__name__} - {exc}"
-                            errors.append(error)
-                            _log(f"[DATE-ERROR] {error}")
-                        finally:
-                            _close_overlay(page, f"{court_num}번 {date_raw} 후")
+                    # 연수문화공원처럼 현재 보이는 날짜만 보지 않고,
+                    # 다음 날짜 묶음까지 넘기며 평일·주말 전체를 수집합니다.
+                    _collect_court_dates_and_times(page, court_num, slots, errors)
 
                     # 다음 코트를 위해 모달을 닫고 목록으로 복귀합니다.
                     _return_to_list(page)
