@@ -1,4 +1,4 @@
-"""달빛공원 예약 페이지 수집기(ENABLED-CLICK v6.1.2 ALLCOURTS).
+"""달빛공원 예약 페이지 수집기(ENABLED-CLICK v6.1.3 MODAL-RESET ALLCOURTS).
 
 - Playwright 단계별 로그 출력
 - 전체 수집 시간 제한
@@ -167,7 +167,7 @@ def _collect_worker(queue: Any) -> None:
         return
 
     try:
-        _log(f"ENABLED-CLICK v6.1.2 ALLCOURTS 수집 시작: {SONGDO_URL}")
+        _log(f"ENABLED-CLICK v6.1.3 MODAL-RESET ALLCOURTS 수집 시작: {SONGDO_URL}")
         with sync_playwright() as p:
             _log("Chromium 실행")
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -250,30 +250,17 @@ def _collect_worker(queue: Any) -> None:
                     # 상세 화면/모달에서 추가 WebSocket 데이터가 들어오도록 잠시 기다립니다.
                     page.wait_for_timeout(700)
 
-                    # 다음 코트를 위해 목록 화면으로 복귀합니다.
-                    returned = False
-                    for label in ("닫기", "이전", "뒤로", "목록"):
-                        try:
-                            btn = page.get_by_role("button", name=re.compile(fr"^\s*{label}\s*$")).first
-                            if btn.count() and not btn.is_disabled(timeout=300):
-                                btn.click(timeout=1000)
-                                page.wait_for_timeout(700)
-                                returned = True
-                                break
-                        except Exception:
-                            pass
-                    if not returned and page.url != list_url:
-                        try:
-                            page.go_back(wait_until="domcontentloaded", timeout=5000)
-                            page.wait_for_timeout(900)
-                            returned = True
-                        except Exception:
-                            pass
-                    if not returned:
-                        # 모달 구조가 불명확하면 목록 URL을 다시 열어 안전하게 복귀합니다.
-                        page.goto(SONGDO_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
-                        page.wait_for_timeout(1500)
-                        list_url = page.url
+                    # 모달 오버레이가 다음 코트 클릭을 가로막는 문제가 있어,
+                    # 코트 하나를 확인할 때마다 목록 URL을 새로 열어 완전히 초기화합니다.
+                    _log(f"{court_num}번: 시간표 확인 완료 — 목록 화면 초기화")
+                    try:
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(200)
+                    except Exception:
+                        pass
+                    page.goto(SONGDO_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
+                    page.wait_for_timeout(1400)
+                    list_url = page.url
                 except Exception as exc:
                     errors.append(f"달빛공원 {court_num}번 코트: {type(exc).__name__} - {exc}")
                     _log(f"{court_num}번 처리 오류: {type(exc).__name__} - {exc}")
