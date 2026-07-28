@@ -1,3 +1,12 @@
+# v6.1.7 STATE-AWARE ACTUAL-DOM
+
+- 목록/상세 화면을 먼저 판별하도록 수정
+- 상세 화면 진입 상태면 `aria-label="목록으로"`로 복귀
+- 목록 코트명 태그를 가정하지 않고 정확한 텍스트로 카드 탐색
+- `wait_for_function()` 제거, Python 폴링으로 교체
+- 실제 `button[data-date-key]`와 `title="n/m 예약 가능"` 구조 사용
+- 코트별 오류 격리 및 디버그 HTML/스크린샷 저장
+
 # v6 beta 변경사항
 
 1. 기존 연수문화공원 scraper는 유지했습니다.

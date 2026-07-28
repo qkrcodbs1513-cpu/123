@@ -1,11 +1,12 @@
-"""달빛공원(송도테니스) 예약 가능 시간 수집기.
+"""달빛공원 예약 가능 시간 수집기.
 
-Prime Reserve의 실제 DOM 구조를 기준으로 동작합니다.
-- 목록 화면에서 5~14번 코트를 찾음
-- 활성화된 '예약' 버튼만 클릭
-- 상세 화면의 button[data-date-key]에서 예약 가능 날짜를 찾음
-- 해당 날짜를 클릭한 뒤 시간대 버튼을 읽음
-- aria-label='목록으로' 버튼으로 목록에 복귀
+실제 Prime Reserve DOM 구조를 기준으로 동작합니다.
+- 현재 화면이 목록인지 상세인지 먼저 판별
+- 상세 화면이면 aria-label="목록으로" 버튼으로 복귀
+- 목록 화면에서 5~14번 코트를 텍스트 기준으로 찾음
+- 각 코트 상세 화면의 button[data-date-key]와 title="n/m 예약 가능"을 사용
+- 예약 가능한 날짜만 클릭하고 시간대 버튼을 읽음
+- 특정 코트가 실패해도 다음 코트로 계속 진행
 """
 from __future__ import annotations
 
@@ -13,13 +14,16 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from config import REQUEST_TIMEOUT, SONGDO_AUTH_STATE, SONGDO_DEBUG_DIR, SONGDO_URL
 
 KST = timezone(timedelta(hours=9))
 WEEKDAYS_KO = ["월", "화", "수", "목", "금", "토", "일"]
-TIME_RE = re.compile(r"(?P<sh>\d{1,2}):(?P<sm>\d{2})\s*[-~–]\s*(?P<eh>\d{1,2}):(?P<em>\d{2})")
+TIME_RE = re.compile(
+    r"(?P<sh>\d{1,2}):(?P<sm>\d{2})\s*(?:-|~|–|—|부터)\s*"
+    r"(?P<eh>\d{1,2}):(?P<em>\d{2})"
+)
 AVAIL_RE = re.compile(r"(?P<available>\d+)\s*/\s*(?P<total>\d+)\s*예약\s*가능")
 TARGET_COURTS = tuple(range(5, 15))
 
@@ -45,10 +49,15 @@ def _make_slot(court_num: int, date_raw: str, text: str) -> dict[str, Any] | Non
     match = TIME_RE.search(text)
     if not match:
         return None
-    if any(word in text for word in ("예약됨", "마감", "불가", "품절", "종료")):
+    lowered = text.replace(" ", "")
+    if any(word in lowered for word in ("예약됨", "마감", "불가", "품절", "종료")):
         return None
+
     sh, sm = int(match["sh"]), int(match["sm"])
     eh, em = int(match["eh"]), int(match["em"])
+    if not (0 <= sh <= 23 and 0 <= eh <= 24 and 0 <= sm <= 59 and 0 <= em <= 59):
+        return None
+
     date_obj = datetime.strptime(date_raw, "%Y-%m-%d").date()
     return {
         "site": "songdo",
@@ -64,40 +73,149 @@ def _make_slot(court_num: int, date_raw: str, text: str) -> dict[str, Any] | Non
     }
 
 
-def _wait_for_list(page: Any, timeout_ms: int = 20000) -> None:
-    """상세 화면이면 목록으로 복귀하고 코트 목록 렌더링을 기다립니다."""
-    back = page.locator('button[aria-label="목록으로"]')
-    if back.count() > 0:
+def _poll(page: Any, predicate: Callable[[], bool], timeout_ms: int, step_ms: int = 250) -> bool:
+    """wait_for_function 대신 Python 측에서 짧게 폴링합니다."""
+    elapsed = 0
+    while elapsed < timeout_ms:
         try:
-            back.first.click(timeout=3000)
+            if predicate():
+                return True
         except Exception:
+            pass
+        page.wait_for_timeout(step_ms)
+        elapsed += step_ms
+    return False
+
+
+def _visible_count(locator: Any) -> int:
+    count = 0
+    try:
+        for i in range(locator.count()):
+            try:
+                if locator.nth(i).is_visible(timeout=200):
+                    count += 1
+            except Exception:
+                continue
+    except Exception:
+        return 0
+    return count
+
+
+def _is_detail(page: Any) -> bool:
+    back = page.locator('button[aria-label="목록으로"]')
+    return _visible_count(back) > 0
+
+
+def _list_has_target_courts(page: Any) -> bool:
+    if _is_detail(page):
+        return False
+    try:
+        body_text = page.locator("body").inner_text(timeout=800)
+    except Exception:
+        return False
+    return "5번 코트" in body_text and "14번 코트" in body_text
+
+
+def _click_reservation_tab(page: Any) -> None:
+    candidates = page.get_by_role("button", name="예약", exact=True)
+    for i in range(candidates.count()):
+        button = candidates.nth(i)
+        try:
+            if button.is_visible(timeout=200) and button.is_enabled(timeout=200):
+                button.click(timeout=1500)
+                return
+        except Exception:
+            continue
+
+
+def _ensure_list(page: Any, timeout_ms: int = 20000) -> None:
+    """목록/상세를 판별한 뒤 5~14번 코트 목록이 보이는 상태를 만듭니다."""
+    if _is_detail(page):
+        _log("상세 화면 감지 — 목록으로 복귀")
+        back = page.locator('button[aria-label="목록으로"]')
+        try:
+            back.first.click(timeout=4000)
+        except Exception as exc:
+            _log(f"목록으로 버튼 클릭 실패({type(exc).__name__}) — URL 재접속")
             page.goto(SONGDO_URL, wait_until="domcontentloaded")
 
-    # 예약 탭이 다른 탭으로 열렸을 경우 다시 선택합니다.
-    try:
-        page.get_by_role("button", name="예약", exact=True).first.click(timeout=2500)
-    except Exception:
-        pass
+    if _poll(page, lambda: _list_has_target_courts(page), 5000):
+        return
 
-    page.wait_for_function(
-        """() => {
-            const hs = [...document.querySelectorAll('h2')].map(x => (x.textContent || '').trim());
-            return hs.some(x => /^5번\s*코트$/.test(x)) && hs.some(x => /^14번\s*코트$/.test(x));
-        }""",
-        timeout=timeout_ms,
-    )
+    # 예약 탭이 아닌 경우에만 탭 클릭을 시도합니다.
+    _click_reservation_tab(page)
+    if _poll(page, lambda: _list_has_target_courts(page), timeout_ms - 5000):
+        return
+
+    # SPA 상태가 꼬였을 때 마지막으로 URL을 새로 열고 다시 확인합니다.
+    _log("목록 미확인 — 예약 URL 재접속")
+    page.goto(SONGDO_URL, wait_until="domcontentloaded")
+    page.wait_for_timeout(1200)
+    if _is_detail(page):
+        try:
+            page.locator('button[aria-label="목록으로"]').first.click(timeout=4000)
+        except Exception:
+            pass
+    _click_reservation_tab(page)
+    if not _poll(page, lambda: _list_has_target_courts(page), timeout_ms):
+        try:
+            current = page.url
+            snippet = " ".join(page.locator("body").inner_text(timeout=1000).split())[:300]
+        except Exception:
+            current, snippet = page.url, ""
+        raise RuntimeError(f"코트 목록을 확인하지 못했습니다. url={current} body={snippet!r}")
 
 
-def _court_card(page: Any, court_num: int) -> Any:
-    """코트 제목을 포함하면서 예약 버튼도 포함하는 가장 가까운 부모 요소."""
-    title = page.get_by_role("heading", name=re.compile(rf"^{court_num}번\s*코트$"), exact=True)
-    if title.count() == 0:
+def _exact_visible_text(page: Any, text: str) -> Any | None:
+    locator = page.get_by_text(text, exact=True)
+    for i in range(locator.count()):
+        item = locator.nth(i)
+        try:
+            if item.is_visible(timeout=250):
+                return item
+        except Exception:
+            continue
+    return None
+
+
+def _court_card(page: Any, court_num: int) -> Any | None:
+    title = _exact_visible_text(page, f"{court_num}번 코트")
+    if title is None:
         return None
-    # 카드 클래스에 의존하지 않고 '예약' 버튼을 가진 가장 가까운 조상을 찾습니다.
-    card = title.first.locator(
-        "xpath=ancestor::*[.//button[normalize-space()='예약']][1]"
-    )
-    return card if card.count() else None
+    # 실제 태그(h2/h3/div)에 의존하지 않고, '예약' 버튼을 포함하는 가장 가까운 조상을 사용합니다.
+    card = title.locator("xpath=ancestor::*[.//button[normalize-space()='예약']][1]")
+    return card if card.count() > 0 else None
+
+
+def _open_court(page: Any, court_num: int) -> None:
+    card = _court_card(page, court_num)
+    if card is None:
+        raise RuntimeError("코트 카드를 찾지 못했습니다.")
+
+    reserve_buttons = card.get_by_role("button", name="예약", exact=True)
+    reserve = None
+    for i in range(reserve_buttons.count()):
+        candidate = reserve_buttons.nth(i)
+        try:
+            if candidate.is_visible(timeout=250) and candidate.is_enabled(timeout=250):
+                reserve = candidate
+                break
+        except Exception:
+            continue
+    if reserve is None:
+        raise RuntimeError("활성화된 예약 버튼을 찾지 못했습니다.")
+
+    reserve.scroll_into_view_if_needed(timeout=1500)
+    reserve.click(timeout=4000)
+
+    def detail_ready() -> bool:
+        if not _is_detail(page):
+            return False
+        title = _exact_visible_text(page, f"{court_num}번 코트")
+        return title is not None and page.locator("button[data-date-key]").count() > 0
+
+    if not _poll(page, detail_ready, 12000):
+        raise RuntimeError("상세 화면 또는 날짜 버튼이 나타나지 않았습니다.")
 
 
 def _available_dates(page: Any) -> list[tuple[str, int, int]]:
@@ -106,13 +224,20 @@ def _available_dates(page: Any) -> list[tuple[str, int, int]]:
     for i in range(buttons.count()):
         button = buttons.nth(i)
         try:
-            date_key = button.get_attribute("data-date-key") or ""
-            title = button.locator("[title*='예약 가능']").first.get_attribute("title") or ""
+            if not button.is_visible(timeout=200) or button.is_disabled(timeout=200):
+                continue
+            date_key = (button.get_attribute("data-date-key") or "").strip()
+            title_nodes = button.locator('[title*="예약 가능"]')
+            title = ""
+            if title_nodes.count() > 0:
+                title = title_nodes.first.get_attribute("title") or ""
+            if not title:
+                title = button.get_attribute("title") or ""
             match = AVAIL_RE.search(title)
             if not date_key or not match:
                 continue
             available, total = int(match["available"]), int(match["total"])
-            if available > 0 and not button.is_disabled():
+            if available > 0:
                 found.append((date_key, available, total))
         except Exception:
             continue
@@ -120,23 +245,39 @@ def _available_dates(page: Any) -> list[tuple[str, int, int]]:
 
 
 def _extract_times(page: Any, court_num: int, date_raw: str) -> list[dict[str, Any]]:
-    """날짜 선택 후 표시된 시간대 요소에서 예약 가능한 시간만 읽습니다."""
-    page.wait_for_timeout(700)
+    def has_time_text() -> bool:
+        try:
+            text = page.locator("body").inner_text(timeout=800)
+            return TIME_RE.search(text) is not None
+        except Exception:
+            return False
+
+    _poll(page, has_time_text, 5000)
     slots: list[dict[str, Any]] = []
-    # 버튼/role=button 모두 확인하되 날짜·달력 버튼은 TIME_RE가 없어 자동 제외됩니다.
     elements = page.locator("button, [role='button']")
     for i in range(elements.count()):
         element = elements.nth(i)
         try:
-            text = " ".join((element.inner_text(timeout=600) or "").split())
-            if not TIME_RE.search(text) or element.is_disabled(timeout=300):
+            if not element.is_visible(timeout=150) or element.is_disabled(timeout=150):
                 continue
+            text = " ".join((element.inner_text(timeout=400) or "").split())
             slot = _make_slot(court_num, date_raw, text)
             if slot:
                 slots.append(slot)
         except Exception:
             continue
     return slots
+
+
+def _save_debug(page: Any, debug_dir: Path, name: str) -> None:
+    try:
+        (debug_dir / f"{name}.html").write_text(page.content(), encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        page.screenshot(path=str(debug_dir / f"{name}.png"), full_page=True)
+    except Exception:
+        pass
 
 
 def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
@@ -151,7 +292,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.1.6 ACTUAL-DOM 수집 시작 — 5~14번 전체 코트")
+        _log("v6.1.7 STATE-AWARE 실제 DOM 수집 시작 — 5~14번 전체 코트")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
@@ -164,58 +305,50 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
 
             _log(f"페이지 접속: {SONGDO_URL}")
             page.goto(SONGDO_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(2500)
-            _wait_for_list(page)
-            _log("코트 목록 렌더링 완료")
+            page.wait_for_timeout(1200)
+            _ensure_list(page)
+            _log("코트 목록 확인 완료")
 
             for court_num in TARGET_COURTS:
                 try:
-                    # 매 코트마다 목록 상태를 보장합니다.
-                    _wait_for_list(page)
-                    card = _court_card(page, court_num)
-                    if card is None:
-                        errors.append(f"달빛공원 {court_num}번: 코트 카드를 찾지 못했습니다.")
-                        continue
-
-                    reserve = card.get_by_role("button", name="예약", exact=True).first
-                    if reserve.count() == 0:
-                        errors.append(f"달빛공원 {court_num}번: 예약 버튼을 찾지 못했습니다.")
-                        continue
-                    if reserve.is_disabled():
-                        _log(f"{court_num}번: 예약 버튼 비활성 — 건너뜀")
-                        continue
-
-                    _log(f"{court_num}번: 상세 화면 진입")
-                    reserve.click(timeout=4000)
-                    page.get_by_role("heading", name=re.compile(rf"^{court_num}번\s*코트$"), exact=True).wait_for(timeout=10000)
-                    page.locator('button[aria-label="목록으로"]').wait_for(timeout=10000)
+                    _ensure_list(page)
+                    _log(f"{court_num}번: 상세 화면 진입 시도")
+                    _open_court(page, court_num)
 
                     dates = _available_dates(page)
                     _log(f"{court_num}번: 예약 가능 날짜 {len(dates)}개")
                     for date_raw, available, total in dates:
                         try:
-                            date_button = page.locator(f'button[data-date-key="{date_raw}"]')
+                            date_button = page.locator(f'button[data-date-key="{date_raw}"]').first
                             date_button.click(timeout=3000)
                             found = _extract_times(page, court_num, date_raw)
                             slots.extend(found)
                             _log(f"{court_num}번 {date_raw}: {available}/{total}, 시간 슬롯 {len(found)}개")
                         except Exception as exc:
-                            errors.append(
-                                f"달빛공원 {court_num}번 {date_raw}: {type(exc).__name__} - {exc}"
-                            )
+                            errors.append(f"달빛공원 {court_num}번 {date_raw}: {type(exc).__name__} - {exc}")
 
-                    page.locator('button[aria-label="목록으로"]').click(timeout=4000)
-                    _wait_for_list(page)
+                    # 다음 코트를 위해 명시적으로 목록으로 복귀합니다.
+                    back = page.locator('button[aria-label="목록으로"]')
+                    if _visible_count(back) > 0:
+                        back.first.click(timeout=4000)
+                    _ensure_list(page)
                 except Exception as exc:
                     errors.append(f"달빛공원 {court_num}번: {type(exc).__name__} - {exc}")
+                    _save_debug(page, debug_dir, f"dalbit_error_court_{court_num}")
                     try:
-                        page.goto(SONGDO_URL, wait_until="domcontentloaded")
-                        page.wait_for_timeout(1500)
+                        _ensure_list(page, timeout_ms=10000)
                     except Exception:
-                        pass
+                        try:
+                            page.goto(SONGDO_URL, wait_until="domcontentloaded")
+                            page.wait_for_timeout(1000)
+                        except Exception:
+                            pass
 
-            context.storage_state(path=str(debug_dir / "songdo_storage_state.json"))
-            (debug_dir / "songdo_last.html").write_text(page.content(), encoding="utf-8")
+            try:
+                context.storage_state(path=str(debug_dir / "songdo_storage_state.json"))
+            except Exception:
+                pass
+            _save_debug(page, debug_dir, "songdo_last")
             browser.close()
     except Exception as exc:
         errors.append(f"달빛공원: {type(exc).__name__} - {exc}")
