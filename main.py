@@ -252,21 +252,19 @@ def monitor_loop() -> None:
             targets = [slot for slot in all_slots if matches_settings(slot, settings)]
 
             songdo_targets = [s for s in targets if s.get("site") == "songdo"]
-yeonsu_targets = [s for s in targets if s.get("site") == "yeonsu"]
+            yeonsu_targets = [s for s in targets if s.get("site") == "yeonsu"]
 
-log(
-    "INFO",
-    f"연수 대상 {len(yeonsu_targets)}개 | "
-    f"달빛 대상 {len(songdo_targets)}개"
-)
+            log(
+                "INFO",
+                f"연수 대상 {len(yeonsu_targets)}개 | 달빛 대상 {len(songdo_targets)}개",
+            )
 
-for s in songdo_targets:
-    log(
-        "INFO",
-        f"[DALBIT TARGET] {s['court']} "
-        f"{s['date']} {s['time']}"
-    )
-    
+            for slot in songdo_targets:
+                log(
+                    "INFO",
+                    f"[DALBIT TARGET] {slot['court']} {slot['date']} {slot['time']}",
+                )
+
             LAST_TOTAL_SLOTS = len(all_slots)
             LAST_TARGET_COUNT = len(targets)
 
