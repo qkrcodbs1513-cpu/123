@@ -498,26 +498,50 @@ def _available_dates(page: Any) -> list[tuple[str, int, int]]:
 
 
 def _extract_times(page: Any, court_num: int, date_raw: str) -> list[dict[str, Any]]:
-    """선택한 날짜의 하위 모달에서 정확한 2시간 예약 버튼만 추출합니다.
+    """선택한 날짜 뒤 화면에 나타난 정확한 2시간 슬롯만 추출합니다.
 
-    상세 화면 전체를 읽으면 날짜/달력/다른 버튼의 숫자가 섞여
-    08:00~20:00, 19:00~14:00 같은 가짜 시간이 만들어질 수 있습니다.
-    따라서 날짜 클릭 후 열린 최상위 하위 모달만 대상으로 하고,
-    버튼 텍스트에 시간 범위가 정확히 1개이며 2시간 간격인 경우만 인정합니다.
+    달빛공원은 코트·날짜에 따라 시간 선택 UI가 별도 dialog가 아니라
+    상세 화면 안쪽에 렌더링되기도 합니다. 그래서 특정 모달 존재를
+    전제로 하지 않고, 현재 보이는 버튼/role=button 전체를 확인합니다.
+
+    단, 부모 버튼의 텍스트에 여러 시간이 섞여 생기는 가짜 범위는 막기 위해
+    시간 범위가 정확히 1개이고 종료-시작이 정확히 120분인 경우만 인정합니다.
     """
 
-    # 날짜 클릭 후 실제 시간 선택 모달이 생길 때까지 기다립니다.
-    _poll(page, lambda: len(_child_overlays(page)) > 0, 5000)
-    children = _child_overlays(page)
-    if not children:
-        _log(f"[TIME-WARN] {court_num}번 {date_raw}: 시간 선택 하위 모달을 찾지 못함")
-        return []
+    def has_exact_two_hour_slot() -> bool:
+        elements = page.locator("button, [role='button']")
+        try:
+            count = elements.count()
+        except Exception:
+            return False
+        for i in range(count):
+            element = elements.nth(i)
+            try:
+                if not element.is_visible(timeout=100):
+                    continue
+                text = " ".join((element.inner_text(timeout=250) or "").split())
+                matches = list(TIME_RE.finditer(text))
+                if len(matches) != 1:
+                    continue
+                match = matches[0]
+                sh, sm = int(match["sh"]), int(match["sm"])
+                eh, em = int(match["eh"]), int(match["em"])
+                if (eh * 60 + em) - (sh * 60 + sm) == 120:
+                    return True
+            except Exception:
+                continue
+        return False
 
-    root = children[-1]
-    elements = root.locator("button, [role='button']")
+    _poll(page, has_exact_two_hour_slot, 5000)
+
     slots: list[dict[str, Any]] = []
+    elements = page.locator("button, [role='button']")
+    try:
+        count = elements.count()
+    except Exception:
+        count = 0
 
-    for i in range(elements.count()):
+    for i in range(count):
         element = elements.nth(i)
         try:
             if not element.is_visible(timeout=150) or element.is_disabled(timeout=150):
@@ -526,7 +550,7 @@ def _extract_times(page: Any, court_num: int, date_raw: str) -> list[dict[str, A
             text = " ".join((element.inner_text(timeout=400) or "").split())
             matches = list(TIME_RE.finditer(text))
 
-            # 여러 시간대가 한 부모 버튼 안에 함께 들어간 경우는 제외합니다.
+            # 여러 시간대가 섞인 부모 요소 및 시간 없는 버튼은 제외합니다.
             if len(matches) != 1:
                 continue
 
@@ -536,20 +560,25 @@ def _extract_times(page: Any, court_num: int, date_raw: str) -> list[dict[str, A
             start_minutes = sh * 60 + sm
             end_minutes = eh * 60 + em
 
-            # 달빛공원 예약 단위는 2시간이므로 정확히 120분만 인정합니다.
+            # 달빛공원은 2시간 단위입니다. 역전·비정상 범위도 함께 제외됩니다.
             if end_minutes - start_minutes != 120:
                 continue
 
             slot = _make_slot(court_num, date_raw, text)
             if slot:
                 slots.append(slot)
+                _log(
+                    f"[TIME] {court_num}번 {date_raw} | "
+                    f"{slot['time']} | start_hour={slot['start_hour']}"
+                )
         except Exception:
             continue
 
-    # 같은 버튼이 중복 선택되는 경우를 방지합니다.
     unique = {f"{s['court_code']}|{s['date_raw']}|{s['time_raw']}": s for s in slots}
-    return sorted(unique.values(), key=lambda s: s["start_hour"])
-
+    result = sorted(unique.values(), key=lambda s: s["start_hour"])
+    if not result:
+        _log(f"[TIME-WARN] {court_num}번 {date_raw}: 정확한 2시간 슬롯 0개")
+    return result
 
 
 def _open_overlays(page: Any) -> Any:
@@ -710,7 +739,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.1.14 EXACT-TIME 진단 시작 — 하위 모달의 정확한 2시간 슬롯만 수집")
+        _log("v6.1.15 FLEX-TIME 진단 시작 — 모달 여부와 무관하게 정확한 2시간 슬롯만 수집")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
