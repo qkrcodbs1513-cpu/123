@@ -1,4 +1,4 @@
-"""달빛공원 예약 페이지 수집기(진단 강화 베타).
+"""달빛공원 예약 페이지 수집기(DOM NOCLICK v6.1).
 
 - Playwright 단계별 로그 출력
 - 전체 수집 시간 제한
@@ -168,7 +168,7 @@ def _collect_worker(queue: Any) -> None:
         return
 
     try:
-        _log(f"수집 시작: {SONGDO_URL}")
+        _log(f"NOCLICK v6.1 수집 시작: {SONGDO_URL}")
         with sync_playwright() as p:
             _log("Chromium 실행")
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -203,12 +203,6 @@ def _collect_worker(queue: Any) -> None:
             page.goto(SONGDO_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
             _log("초기 데이터 대기 5초")
             page.wait_for_timeout(5000)
-
-            for label in ("닫기", "확인"):
-                try:
-                    page.get_by_role("button", name=label).first.click(timeout=500)
-                except Exception:
-                    pass
 
             body_text = page.locator("body").inner_text(timeout=3000)
             date_raw = _normalise_date(body_text) or datetime.now(KST).strftime("%Y-%m-%d")
