@@ -243,9 +243,7 @@ def monitor_loop() -> None:
                 all_slots.extend(yeonsu_slots)
                 errors.extend(yeonsu_errors)
             if settings["songdo_enabled"]:
-                log("INFO", "달빛공원 수집 시작")
                 songdo_slots, songdo_errors = get_songdo_slots_with_status()
-                log("INFO", f"달빛공원 수집 종료: 가능 슬롯 {len(songdo_slots)}개, 오류 {len(songdo_errors)}개")
                 all_slots.extend(songdo_slots)
                 errors.extend(songdo_errors)
             if errors:
@@ -464,7 +462,7 @@ def main() -> None:
         ok = send_telegram_message(f"✅ <b>텔레그램 연결 정상</b>\n{now_str()}")
         raise SystemExit(0 if ok else 1)
 
-    log("START", "ChaenissBot v6.1.5 BACK-BUTTON ALLCOURTS 실행")
+    log("START", "ChaenissBot v6.1.6 ACTUAL-DOM 실행")
     log("INFO", settings_text().replace("<b>", "").replace("</b>", "").replace("\n", " | "))
 
     command_thread = threading.Thread(

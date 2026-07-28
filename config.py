@@ -31,8 +31,7 @@ DEFAULT_WEEKEND_HOURS: list[int] | None = None  # None = 모든 시간
 
 SONGDO_URL = os.getenv("SONGDO_URL", "https://songdotennis.co.kr/songdo-tennis?tab=reservations").strip()
 SONGDO_ENABLED_DEFAULT = os.getenv("SONGDO_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-_songdo_raw = [x.strip() for x in os.getenv("SONGDO_COURTS", "5,6,7,8,9,10,11,12,13,14").split(",") if x.strip()]
-SONGDO_COURTS = [str(n) for n in range(5, 15)]  # 달빛공원 5~14번 코트 전체 고정 감시
+SONGDO_COURTS = [x.strip() for x in os.getenv("SONGDO_COURTS", "").split(",") if x.strip()]
 SONGDO_AUTH_STATE = os.getenv("SONGDO_AUTH_STATE", "").strip()
 SONGDO_DEBUG_DIR = os.getenv("SONGDO_DEBUG_DIR", str(DATA_DIR / "songdo_debug"))
 
