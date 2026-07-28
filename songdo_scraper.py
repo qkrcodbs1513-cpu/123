@@ -935,7 +935,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.1.17 AUGUST-ARROW 시작 — 달력 오른쪽 화살표로 다음 달 순회")
+        _log("v6.1.18 API-PROBE 시작 — 달력 오른쪽 화살표로 다음 달 순회")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
@@ -945,6 +945,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
             context = browser.new_context(**context_args)
             page = context.new_page()
             page.set_default_timeout(REQUEST_TIMEOUT * 1000)
+            _, summarize_api_probe = _install_api_probe(page, debug_dir)
 
             _goto_songdo(page)
             _ensure_list(page)
@@ -979,6 +980,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
             except Exception:
                 pass
             _save_debug(page, debug_dir, "songdo_last")
+            summarize_api_probe()
             browser.close()
     except Exception as exc:
         errors.append(f"달빛공원: {type(exc).__name__} - {exc}")
