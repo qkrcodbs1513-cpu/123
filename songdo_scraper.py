@@ -248,12 +248,10 @@ def _goto_songdo(page: Any) -> None:
 def _ensure_list(page: Any, timeout_ms: int = 30000) -> None:
     """Prime Reserve 메인/상세 어느 상태에서든 달빛공원 코트 목록으로 진입합니다."""
     if _is_detail(page):
-        _log("상세 화면 감지 — 목록으로 복귀")
-        back = page.locator('button[aria-label="목록으로"]')
-        try:
-            back.first.click(timeout=4000)
-        except Exception as exc:
-            _log(f"목록으로 버튼 클릭 실패({type(exc).__name__}) — 예약 URL 재접속")
+        _log("상세 화면 감지 — 모달 정리 후 목록으로 복귀")
+        _return_to_list(page)
+        if _is_detail(page):
+            _log("목록 복귀 미확인 — 예약 URL 재접속")
             _goto_songdo(page)
 
     if _poll(page, lambda: _list_has_target_courts(page), 5000):
@@ -501,7 +499,9 @@ def _extract_times(page: Any, court_num: int, date_raw: str) -> list[dict[str, A
 
     _poll(page, has_time_text, 5000)
     slots: list[dict[str, Any]] = []
-    elements = page.locator("button, [role='button']")
+    overlays = _open_overlays(page)
+    root = overlays.last if _visible_count(overlays) > 0 else page.locator("body")
+    elements = root.locator("button, [role='button']")
     for i in range(elements.count()):
         element = elements.nth(i)
         try:
@@ -515,6 +515,94 @@ def _extract_times(page: Any, court_num: int, date_raw: str) -> list[dict[str, A
             continue
     return slots
 
+
+
+def _open_overlays(page: Any) -> Any:
+    """Prime Reserve에서 포인터를 가로채는 열린 모달/오버레이를 반환합니다."""
+    return page.locator(
+        'div[data-state="open"].fixed.inset-0, '
+        '[role="dialog"][data-state="open"], '
+        '[role="alertdialog"][data-state="open"]'
+    )
+
+
+def _close_overlay(page: Any, label: str = "") -> bool:
+    """열린 날짜/안내 모달을 닫습니다. Escape → 닫기 버튼 → DOM 제거 순서로 시도합니다."""
+    overlays = _open_overlays(page)
+    if _visible_count(overlays) == 0:
+        return True
+
+    prefix = f"[{label}] " if label else ""
+    _log(f"{prefix}열린 오버레이 감지 — 닫기 시도")
+
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    if _poll(page, lambda: _visible_count(_open_overlays(page)) == 0, 1500, 150):
+        _log(f"{prefix}Escape로 오버레이 닫기 완료")
+        return True
+
+    close_candidates = page.locator(
+        '[role="dialog"] button[aria-label*="닫"], '
+        '[role="alertdialog"] button[aria-label*="닫"], '
+        'div[data-state="open"].fixed.inset-0 button[aria-label*="닫"], '
+        '[role="dialog"] button:has-text("닫기"), '
+        '[role="alertdialog"] button:has-text("닫기"), '
+        'div[data-state="open"].fixed.inset-0 button:has-text("닫기")'
+    )
+    for i in range(close_candidates.count()):
+        button = close_candidates.nth(i)
+        try:
+            if button.is_visible(timeout=200):
+                button.evaluate("el => el.click()")
+                if _poll(page, lambda: _visible_count(_open_overlays(page)) == 0, 1500, 150):
+                    _log(f"{prefix}닫기 버튼 DOM click() 완료")
+                    return True
+        except Exception:
+            continue
+
+    # 조회 전용 스크래퍼이므로, UI가 닫기 이벤트를 제공하지 않을 때만
+    # 포인터를 가로채는 백드롭을 DOM에서 제거해 다음 탐색을 계속합니다.
+    try:
+        removed = page.evaluate(
+            """() => {
+                const selectors = [
+                    'div[data-state="open"].fixed.inset-0',
+                    '[role="dialog"][data-state="open"]',
+                    '[role="alertdialog"][data-state="open"]'
+                ];
+                const nodes = [...new Set(selectors.flatMap(s => [...document.querySelectorAll(s)]))];
+                nodes.forEach(el => el.remove());
+                document.body.style.overflow = '';
+                document.documentElement.style.overflow = '';
+                return nodes.length;
+            }"""
+        )
+        _log(f"{prefix}오버레이 DOM 정리 {removed}개")
+    except Exception as exc:
+        _log(f"{prefix}오버레이 정리 실패: {type(exc).__name__}: {exc}")
+
+    return _visible_count(_open_overlays(page)) == 0
+
+
+def _dom_click(locator: Any) -> None:
+    """오버레이/애니메이션으로 일반 클릭이 막힐 때 실제 DOM click 이벤트를 발생시킵니다."""
+    locator.evaluate("el => el.click()")
+
+
+def _return_to_list(page: Any) -> None:
+    """상세·모달 상태를 정리하고 코트 목록으로 복귀합니다."""
+    _close_overlay(page, "목록복귀")
+    if not _is_detail(page):
+        return
+    back = page.locator('button[aria-label="목록으로"]').first
+    try:
+        _dom_click(back)
+        _log("목록으로 버튼 DOM click() 실행")
+    except Exception as exc:
+        _log(f"목록으로 DOM click() 실패: {type(exc).__name__}: {exc}")
+    _poll(page, lambda: _list_has_target_courts(page), 4000)
 
 def _save_debug(page: Any, debug_dir: Path, name: str) -> None:
     try:
@@ -539,7 +627,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.1.10 CLICK-FALLBACK 진단 시작 — Prime Reserve 예약 메뉴 실제 클릭")
+        _log("v6.1.11 MODAL-CLEANUP 진단 시작 — 날짜 모달 정리 및 DOM 클릭")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
@@ -564,18 +652,24 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
                     _log(f"{court_num}번: 예약 가능 날짜 {len(dates)}개")
                     for date_raw, available, total in dates:
                         try:
+                            # 이전 날짜에서 열린 모달이 남아 있으면 먼저 닫습니다.
+                            _close_overlay(page, f"{court_num}번 {date_raw} 전")
                             date_button = page.locator(f'button[data-date-key="{date_raw}"]').first
-                            date_button.click(timeout=3000)
+                            _log(f"{court_num}번 {date_raw}: 날짜 DOM click() 시도")
+                            _dom_click(date_button)
+                            page.wait_for_timeout(300)
                             found = _extract_times(page, court_num, date_raw)
                             slots.extend(found)
                             _log(f"{court_num}번 {date_raw}: {available}/{total}, 시간 슬롯 {len(found)}개")
                         except Exception as exc:
-                            errors.append(f"달빛공원 {court_num}번 {date_raw}: {type(exc).__name__} - {exc}")
+                            error = f"달빛공원 {court_num}번 {date_raw}: {type(exc).__name__} - {exc}"
+                            errors.append(error)
+                            _log(f"[DATE-ERROR] {error}")
+                        finally:
+                            _close_overlay(page, f"{court_num}번 {date_raw} 후")
 
-                    # 다음 코트를 위해 명시적으로 목록으로 복귀합니다.
-                    back = page.locator('button[aria-label="목록으로"]')
-                    if _visible_count(back) > 0:
-                        back.first.click(timeout=4000)
+                    # 다음 코트를 위해 모달을 닫고 목록으로 복귀합니다.
+                    _return_to_list(page)
                     _ensure_list(page)
                 except Exception as exc:
                     errors.append(f"달빛공원 {court_num}번: {type(exc).__name__} - {exc}")
