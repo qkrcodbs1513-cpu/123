@@ -410,6 +410,9 @@ def _open_court(page: Any, court_num: int, debug_dir: Path) -> None:
     _save_debug(page, debug_dir, f"probe_{court_num}_before_click")
     _log(f"[{court_num}번][5] 예약 버튼 클릭 직전")
     before_url = page.url
+
+    # 이전 날짜 조회에서 남은 하위 모달이 카드 클릭을 가리지 않도록 먼저 정리합니다.
+    _close_overlay(page, f"{court_num}번 카드 클릭 전")
     reserve.scroll_into_view_if_needed(timeout=2000)
 
     # Prime Reserve의 SPA 버튼은 클릭 이벤트 직후 DOM이 교체되면서
@@ -417,11 +420,16 @@ def _open_court(page: Any, court_num: int, debug_dir: Path) -> None:
     # 따라서 클릭 예외 자체를 실패로 단정하지 않고 상세 화면 진입 여부를 먼저 검증합니다.
     click_error: Exception | None = None
     try:
-        reserve.click(timeout=2500, no_wait_after=True)
-        _log(f"[{court_num}번][6A] Playwright 클릭 명령 반환")
+        reserve.evaluate("el => el.click()")
+        _log(f"[{court_num}번][6A] DOM click() 실행 완료")
     except Exception as exc:
         click_error = exc
-        _log(f"[{court_num}번][6A] Playwright 클릭 예외(진입 여부 계속 확인): {type(exc).__name__}: {exc}")
+        _log(f"[{court_num}번][6A] DOM click() 예외: {type(exc).__name__}: {exc}")
+        try:
+            reserve.click(timeout=1500, no_wait_after=True, force=True)
+            _log(f"[{court_num}번][6A-FORCE] Playwright force 클릭 실행")
+        except Exception as force_exc:
+            _log(f"[{court_num}번][6A-FORCE] 클릭 예외: {type(force_exc).__name__}: {force_exc}")
 
     entered = _poll(
         page,
@@ -499,8 +507,8 @@ def _extract_times(page: Any, court_num: int, date_raw: str) -> list[dict[str, A
 
     _poll(page, has_time_text, 5000)
     slots: list[dict[str, Any]] = []
-    overlays = _open_overlays(page)
-    root = overlays.last if _visible_count(overlays) > 0 else page.locator("body")
+    children = _child_overlays(page)
+    root = children[-1] if children else page.locator("body")
     elements = root.locator("button, [role='button']")
     for i in range(elements.count()):
         element = elements.nth(i)
@@ -518,7 +526,7 @@ def _extract_times(page: Any, court_num: int, date_raw: str) -> list[dict[str, A
 
 
 def _open_overlays(page: Any) -> Any:
-    """Prime Reserve에서 포인터를 가로채는 열린 모달/오버레이를 반환합니다."""
+    """Prime Reserve에서 현재 열린 모달/오버레이를 반환합니다."""
     return page.locator(
         'div[data-state="open"].fixed.inset-0, '
         '[role="dialog"][data-state="open"], '
@@ -526,65 +534,110 @@ def _open_overlays(page: Any) -> Any:
     )
 
 
-def _close_overlay(page: Any, label: str = "") -> bool:
-    """열린 날짜/안내 모달을 닫습니다. Escape → 닫기 버튼 → DOM 제거 순서로 시도합니다."""
-    overlays = _open_overlays(page)
-    if _visible_count(overlays) == 0:
-        return True
-
-    prefix = f"[{label}] " if label else ""
-    _log(f"{prefix}열린 오버레이 감지 — 닫기 시도")
-
+def _is_detail_overlay(locator: Any) -> bool:
+    """코트 상세 화면 자체를 감싸는 오버레이인지 확인합니다."""
     try:
-        page.keyboard.press("Escape")
+        return locator.locator(
+            'button[aria-label="목록으로"], button[data-date-key]'
+        ).count() > 0
     except Exception:
-        pass
-    if _poll(page, lambda: _visible_count(_open_overlays(page)) == 0, 1500, 150):
-        _log(f"{prefix}Escape로 오버레이 닫기 완료")
-        return True
+        return False
 
-    close_candidates = page.locator(
-        '[role="dialog"] button[aria-label*="닫"], '
-        '[role="alertdialog"] button[aria-label*="닫"], '
-        'div[data-state="open"].fixed.inset-0 button[aria-label*="닫"], '
-        '[role="dialog"] button:has-text("닫기"), '
-        '[role="alertdialog"] button:has-text("닫기"), '
-        'div[data-state="open"].fixed.inset-0 button:has-text("닫기")'
-    )
-    for i in range(close_candidates.count()):
-        button = close_candidates.nth(i)
+
+def _child_overlays(page: Any) -> list[Any]:
+    """코트 상세는 보존하고, 그 위에 열린 날짜/시간/안내 모달만 반환합니다."""
+    overlays = _open_overlays(page)
+    result: list[Any] = []
+    for i in range(overlays.count()):
+        overlay = overlays.nth(i)
         try:
-            if button.is_visible(timeout=200):
-                button.evaluate("el => el.click()")
-                if _poll(page, lambda: _visible_count(_open_overlays(page)) == 0, 1500, 150):
-                    _log(f"{prefix}닫기 버튼 DOM click() 완료")
-                    return True
+            if overlay.is_visible(timeout=150) and not _is_detail_overlay(overlay):
+                result.append(overlay)
         except Exception:
             continue
+    return result
 
-    # 조회 전용 스크래퍼이므로, UI가 닫기 이벤트를 제공하지 않을 때만
-    # 포인터를 가로채는 백드롭을 DOM에서 제거해 다음 탐색을 계속합니다.
+
+def _close_overlay(page: Any, label: str = "", preserve_detail: bool = True) -> bool:
+    """날짜/시간 모달만 닫습니다. 코트 상세 오버레이는 날짜 탐색 중 보존합니다."""
+    prefix = f"[{label}] " if label else ""
+
+    def targets() -> list[Any]:
+        if preserve_detail:
+            return _child_overlays(page)
+        result: list[Any] = []
+        overlays = _open_overlays(page)
+        for i in range(overlays.count()):
+            overlay = overlays.nth(i)
+            try:
+                if overlay.is_visible(timeout=150):
+                    result.append(overlay)
+            except Exception:
+                continue
+        return result
+
+    current = targets()
+    if not current:
+        return True
+
+    _log(f"{prefix}하위 오버레이 {len(current)}개 감지 — 닫기 시도")
+
+    # 최상위 하위 모달의 닫기 버튼부터 직접 실행합니다.
+    for overlay in reversed(current):
+        close_candidates = overlay.locator(
+            'button[aria-label*="닫"], button:has-text("닫기"), '
+            'button[aria-label="Close"], button[data-slot="dialog-close"]'
+        )
+        for i in range(close_candidates.count()):
+            button = close_candidates.nth(i)
+            try:
+                if button.is_visible(timeout=200):
+                    button.evaluate("el => el.click()")
+                    page.wait_for_timeout(150)
+                    break
+            except Exception:
+                continue
+
+    if not targets():
+        _log(f"{prefix}닫기 버튼으로 하위 오버레이 정리 완료")
+        return True
+
+    # 하위 모달이 남은 경우에만 Escape를 사용합니다. 상세 화면 단독 상태에서는 누르지 않습니다.
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+    except Exception:
+        pass
+    if not targets():
+        _log(f"{prefix}Escape로 하위 오버레이 정리 완료")
+        return True
+
+    # 마지막 수단: 상세 오버레이를 제외한 하위 모달만 DOM에서 제거합니다.
     try:
         removed = page.evaluate(
-            """() => {
+            """(preserveDetail) => {
                 const selectors = [
                     'div[data-state="open"].fixed.inset-0',
                     '[role="dialog"][data-state="open"]',
                     '[role="alertdialog"][data-state="open"]'
                 ];
                 const nodes = [...new Set(selectors.flatMap(s => [...document.querySelectorAll(s)]))];
-                nodes.forEach(el => el.remove());
+                const targets = nodes.filter(el => {
+                    const isDetail = !!el.querySelector('button[aria-label="목록으로"], button[data-date-key]');
+                    return !preserveDetail || !isDetail;
+                });
+                targets.forEach(el => el.remove());
                 document.body.style.overflow = '';
                 document.documentElement.style.overflow = '';
-                return nodes.length;
-            }"""
+                return targets.length;
+            }""",
+            preserve_detail,
         )
-        _log(f"{prefix}오버레이 DOM 정리 {removed}개")
+        _log(f"{prefix}하위 오버레이 DOM 정리 {removed}개")
     except Exception as exc:
-        _log(f"{prefix}오버레이 정리 실패: {type(exc).__name__}: {exc}")
+        _log(f"{prefix}하위 오버레이 정리 실패: {type(exc).__name__}: {exc}")
 
-    return _visible_count(_open_overlays(page)) == 0
-
+    return not targets()
 
 def _dom_click(locator: Any) -> None:
     """오버레이/애니메이션으로 일반 클릭이 막힐 때 실제 DOM click 이벤트를 발생시킵니다."""
@@ -602,7 +655,10 @@ def _return_to_list(page: Any) -> None:
         _log("목록으로 버튼 DOM click() 실행")
     except Exception as exc:
         _log(f"목록으로 DOM click() 실패: {type(exc).__name__}: {exc}")
-    _poll(page, lambda: _list_has_target_courts(page), 4000)
+    if not _poll(page, lambda: _list_has_target_courts(page), 4000):
+        _log("목록으로 DOM click() 후 목록 미확인 — 예약 URL 재접속")
+        _goto_songdo(page)
+        _poll(page, lambda: _list_has_target_courts(page), 5000)
 
 def _save_debug(page: Any, debug_dir: Path, name: str) -> None:
     try:
@@ -627,7 +683,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.1.11 MODAL-CLEANUP 진단 시작 — 날짜 모달 정리 및 DOM 클릭")
+        _log("v6.1.12 NESTED-MODAL 진단 시작 — 상세 모달 보존 및 하위 모달만 정리")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
