@@ -1,4 +1,4 @@
-"""달빛공원 예약 페이지 수집기(ENABLED-CLICK v6.1.4 H2-SELECTOR MODAL-RESET ALLCOURTS).
+"""달빛공원 예약 페이지 수집기(ENABLED-CLICK v6.1.5 BACK-BUTTON ALLCOURTS).
 
 - Playwright 단계별 로그 출력
 - 전체 수집 시간 제한
@@ -167,7 +167,7 @@ def _collect_worker(queue: Any) -> None:
         return
 
     try:
-        _log(f"ENABLED-CLICK v6.1.4 H2-SELECTOR MODAL-RESET ALLCOURTS 수집 시작: {SONGDO_URL}")
+        _log(f"ENABLED-CLICK v6.1.5 BACK-BUTTON ALLCOURTS 수집 시작: {SONGDO_URL}")
         with sync_playwright() as p:
             _log("Chromium 실행")
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -220,6 +220,30 @@ def _collect_worker(queue: Any) -> None:
             target_courts = [str(n) for n in range(5, 15)]
             _log("5~14번 코트의 활성화된 예약 버튼만 클릭해 시간표 확인")
 
+            def wait_for_court_list(timeout_ms: int = 15000) -> bool:
+                """Nuxt 렌더링이 끝나 5번 코트가 실제 DOM에 나타날 때까지 기다립니다."""
+                try:
+                    page.wait_for_function(
+                        """() => Array.from(document.querySelectorAll('h2')).some(
+                          el => (el.textContent || '').replace(/\s+/g, ' ').trim() === '5번 코트'
+                        )""",
+                        timeout=timeout_ms,
+                    )
+                    return True
+                except Exception:
+                    # 예약 탭이 선택되지 않은 경우 한 번 눌러 본 뒤 다시 대기합니다.
+                    try:
+                        page.get_by_text("예약", exact=True).first.click(timeout=1500)
+                        page.wait_for_function(
+                            """() => Array.from(document.querySelectorAll('h2')).some(
+                              el => (el.textContent || '').replace(/\s+/g, ' ').trim() === '5번 코트'
+                            )""",
+                            timeout=timeout_ms,
+                        )
+                        return True
+                    except Exception:
+                        return False
+
             def read_current_slots(court_num: str) -> list[dict[str, Any]]:
                 current_text = page.locator("body").inner_text(timeout=3000)
                 current_date = _normalise_date(current_text) or date_raw
@@ -227,83 +251,78 @@ def _collect_worker(queue: Any) -> None:
                 _log(f"{court_num}번 시간표 DOM 후보 {len(found)}개")
                 return found
 
-            list_url = page.url
+            def close_detail() -> None:
+                """사용자가 제공한 실제 버튼: aria-label='목록으로'."""
+                back = page.locator('button[aria-label="목록으로"]').first
+                if back.count() > 0:
+                    _log("상세 화면 닫기: 목록으로 버튼 클릭")
+                    back.click(timeout=3000, force=True)
+                else:
+                    _log("목록으로 버튼 없음 — Escape 사용")
+                    page.keyboard.press("Escape")
+                page.wait_for_timeout(500)
+                if not wait_for_court_list(8000):
+                    _log("목록 복귀 확인 실패 — 예약 목록 URL 재접속")
+                    page.goto(SONGDO_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
+                    wait_for_court_list(15000)
+
+            if not wait_for_court_list(15000):
+                raise RuntimeError("코트 목록 렌더링을 15초 동안 기다렸지만 5번 코트를 찾지 못했습니다.")
+
+            headings = [
+                " ".join(t.split())
+                for t in page.locator("h2").all_inner_texts()
+                if "코트" in t
+            ]
+            _log(f"렌더링 완료 h2 코트명 {len(headings)}개: {headings}")
+
             for court_num in target_courts:
                 try:
-                    # 실제 코트명은 <h2>5번 코트</h2> 구조입니다.
-                    # get_by_text() 대신 h2 태그를 직접 지정해 코트명을 안정적으로 찾습니다.
-                    court_name = page.locator("h2").filter(
-                        has_text=re.compile(fr"^\s*{court_num}\s*번\s*코트\s*$")
+                    if not wait_for_court_list(8000):
+                        raise RuntimeError("코트 목록이 렌더링되지 않았습니다.")
+
+                    court_name = page.get_by_role(
+                        "heading", name=re.compile(fr"^\s*{court_num}\s*번\s*코트\s*$")
                     ).first
                     if court_name.count() == 0:
-                        # 렌더링이 늦는 경우를 대비해 해당 h2를 한 번 더 기다립니다.
-                        try:
-                            page.locator("h2").filter(
-                                has_text=re.compile(fr"^\s*{court_num}\s*번\s*코트\s*$")
-                            ).first.wait_for(state="attached", timeout=2500)
-                            court_name = page.locator("h2").filter(
-                                has_text=re.compile(fr"^\s*{court_num}\s*번\s*코트\s*$")
-                            ).first
-                        except Exception:
-                            pass
-                    if court_name.count() == 0:
-                        labels = []
-                        try:
-                            labels = [
-                                " ".join(t.split())
-                                for t in page.locator("h2").all_inner_texts()
-                                if "코트" in t
-                            ]
-                        except Exception:
-                            pass
-                        _log(f"{court_num}번: h2 코트명을 찾지 못함 | 현재 h2={labels[:20]}")
+                        _log(f"{court_num}번: 코트 제목 없음")
                         continue
 
-                    # h2에서 위로 올라가며 '예약' 버튼을 포함한 가장 가까운 div 카드를 찾습니다.
                     card = court_name.locator(
-                        "xpath=ancestor::div[.//button[contains(normalize-space(.), '예약')]][1]"
+                        "xpath=ancestor::*[.//button[normalize-space(.)='예약']][1]"
                     )
                     if card.count() == 0:
-                        _log(f"{court_num}번: 예약 버튼이 포함된 카드를 찾지 못함")
+                        _log(f"{court_num}번: 예약 버튼이 포함된 카드 없음")
                         continue
+
                     reserve = card.locator("button").filter(has_text=re.compile(r"^\s*예약\s*$")).first
                     if reserve.count() == 0:
                         _log(f"{court_num}번: 예약 버튼 없음")
                         continue
+
                     disabled = reserve.is_disabled(timeout=800)
                     aria_disabled = reserve.get_attribute("aria-disabled") == "true"
                     if disabled or aria_disabled:
-                        _log(f"{court_num}번: 예약 버튼 비활성 — 클릭하지 않음")
+                        _log(f"{court_num}번: 예약 버튼 비활성 — 건너뜀")
                         continue
 
                     _log(f"{court_num}번: 활성 예약 버튼 클릭")
                     reserve.click(timeout=3000)
                     page.wait_for_timeout(1800)
                     slots.extend(read_current_slots(court_num))
-
-                    # 상세 화면/모달에서 추가 WebSocket 데이터가 들어오도록 잠시 기다립니다.
                     page.wait_for_timeout(700)
-
-                    # 모달 오버레이가 다음 코트 클릭을 가로막는 문제가 있어,
-                    # 코트 하나를 확인할 때마다 목록 URL을 새로 열어 완전히 초기화합니다.
-                    _log(f"{court_num}번: 시간표 확인 완료 — 목록 화면 초기화")
-                    try:
-                        page.keyboard.press("Escape")
-                        page.wait_for_timeout(200)
-                    except Exception:
-                        pass
-                    page.goto(SONGDO_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
-                    page.wait_for_timeout(1400)
-                    list_url = page.url
+                    close_detail()
                 except Exception as exc:
                     errors.append(f"달빛공원 {court_num}번 코트: {type(exc).__name__} - {exc}")
                     _log(f"{court_num}번 처리 오류: {type(exc).__name__} - {exc}")
                     try:
-                        page.goto(SONGDO_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
-                        page.wait_for_timeout(1200)
-                        list_url = page.url
+                        close_detail()
                     except Exception:
-                        pass
+                        try:
+                            page.goto(SONGDO_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
+                            wait_for_court_list(15000)
+                        except Exception:
+                            pass
 
             _log("WebSocket 추가 데이터 대기 3초")
             page.wait_for_timeout(3000)
