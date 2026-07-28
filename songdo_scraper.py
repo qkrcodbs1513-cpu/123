@@ -1,4 +1,4 @@
-"""달빛공원 예약 페이지 수집기(ENABLED-CLICK v6.1.3 MODAL-RESET ALLCOURTS).
+"""달빛공원 예약 페이지 수집기(ENABLED-CLICK v6.1.4 H2-SELECTOR MODAL-RESET ALLCOURTS).
 
 - Playwright 단계별 로그 출력
 - 전체 수집 시간 제한
@@ -167,7 +167,7 @@ def _collect_worker(queue: Any) -> None:
         return
 
     try:
-        _log(f"ENABLED-CLICK v6.1.3 MODAL-RESET ALLCOURTS 수집 시작: {SONGDO_URL}")
+        _log(f"ENABLED-CLICK v6.1.4 H2-SELECTOR MODAL-RESET ALLCOURTS 수집 시작: {SONGDO_URL}")
         with sync_playwright() as p:
             _log("Chromium 실행")
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -206,6 +206,15 @@ def _collect_worker(queue: Any) -> None:
             body_text = page.locator("body").inner_text(timeout=3000)
             date_raw = _normalise_date(body_text) or datetime.now(KST).strftime("%Y-%m-%d")
             _log(f"화면 기준 날짜: {date_raw}")
+            try:
+                court_headings = [
+                    " ".join(t.split())
+                    for t in page.locator("h2").all_inner_texts()
+                    if "코트" in t
+                ]
+                _log(f"화면 h2 코트명 {len(court_headings)}개: {court_headings}")
+            except Exception as exc:
+                _log(f"h2 코트명 진단 실패: {type(exc).__name__} - {exc}")
 
             # 달빛공원 코트는 5~14번을 전부 확인합니다.
             target_courts = [str(n) for n in range(5, 15)]
@@ -221,13 +230,38 @@ def _collect_worker(queue: Any) -> None:
             list_url = page.url
             for court_num in target_courts:
                 try:
-                    # 코트명 요소에서 가장 가까운 '예약' 버튼 포함 카드로 올라갑니다.
-                    court_name = page.get_by_text(re.compile(fr"^\s*{court_num}\s*번\s*코트\s*$")).first
+                    # 실제 코트명은 <h2>5번 코트</h2> 구조입니다.
+                    # get_by_text() 대신 h2 태그를 직접 지정해 코트명을 안정적으로 찾습니다.
+                    court_name = page.locator("h2").filter(
+                        has_text=re.compile(fr"^\s*{court_num}\s*번\s*코트\s*$")
+                    ).first
                     if court_name.count() == 0:
-                        _log(f"{court_num}번: 코트 카드를 찾지 못함")
+                        # 렌더링이 늦는 경우를 대비해 해당 h2를 한 번 더 기다립니다.
+                        try:
+                            page.locator("h2").filter(
+                                has_text=re.compile(fr"^\s*{court_num}\s*번\s*코트\s*$")
+                            ).first.wait_for(state="attached", timeout=2500)
+                            court_name = page.locator("h2").filter(
+                                has_text=re.compile(fr"^\s*{court_num}\s*번\s*코트\s*$")
+                            ).first
+                        except Exception:
+                            pass
+                    if court_name.count() == 0:
+                        labels = []
+                        try:
+                            labels = [
+                                " ".join(t.split())
+                                for t in page.locator("h2").all_inner_texts()
+                                if "코트" in t
+                            ]
+                        except Exception:
+                            pass
+                        _log(f"{court_num}번: h2 코트명을 찾지 못함 | 현재 h2={labels[:20]}")
                         continue
+
+                    # h2에서 위로 올라가며 '예약' 버튼을 포함한 가장 가까운 div 카드를 찾습니다.
                     card = court_name.locator(
-                        "xpath=ancestor::*[.//button[contains(normalize-space(.), '예약')]][1]"
+                        "xpath=ancestor::div[.//button[contains(normalize-space(.), '예약')]][1]"
                     )
                     if card.count() == 0:
                         _log(f"{court_num}번: 예약 버튼이 포함된 카드를 찾지 못함")
