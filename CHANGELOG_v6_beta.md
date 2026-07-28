@@ -13,3 +13,7 @@
 - 로그인 세션 만료 시점
 - Railway IP에서의 사이트 접근 허용 여부
 - 사이트 UI 변경 시 선택자 보정
+
+## Railway build fix
+- Python base image pinned to `python:3.12-slim-bookworm`.
+- Fixes Playwright dependency installation failure caused by unavailable `ttf-unifont` packages on newer Debian images.
