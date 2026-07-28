@@ -13,6 +13,7 @@ from config import (
     DEFAULT_WEEKEND_HOURS,
     SETTINGS_FILE,
     STATE_FILE,
+    SONGDO_ENABLED_DEFAULT,
 )
 
 KST = timezone(timedelta(hours=9))
@@ -21,6 +22,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "courts": DEFAULT_COURTS,
     "weekday_hours": DEFAULT_WEEKDAY_HOURS,
     "weekend_hours": DEFAULT_WEEKEND_HOURS,
+    "yeonsu_enabled": True,
+    "songdo_enabled": SONGDO_ENABLED_DEFAULT,
 }
 
 DEFAULT_STATE: dict[str, Any] = {
@@ -66,6 +69,10 @@ def load_settings() -> dict[str, Any]:
     data = _load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
     courts = [x for x in data.get("courts", []) if x in {"A", "B", "C"}]
     data["courts"] = courts or ["A", "B", "C"]
+    data["yeonsu_enabled"] = bool(data.get("yeonsu_enabled", True))
+    data["songdo_enabled"] = bool(data.get("songdo_enabled", SONGDO_ENABLED_DEFAULT))
+    if not data["yeonsu_enabled"] and not data["songdo_enabled"]:
+        data["yeonsu_enabled"] = True
 
     for key, fallback in (
         ("weekday_hours", DEFAULT_WEEKDAY_HOURS),

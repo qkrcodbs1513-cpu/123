@@ -14,6 +14,7 @@ from config import (
     TELEGRAM_POLL_TIMEOUT,
 )
 from scraper import get_available_slots_with_status, matches_settings, slot_key
+from songdo_scraper import get_songdo_slots_with_status
 from storage import load_settings, load_state, save_settings, save_state
 from telegram_bot import (
     answer_callback_query,
@@ -60,8 +61,12 @@ def settings_text() -> str:
         courts = "/".join(APP_SETTINGS["courts"])
         weekday = hours_text(APP_SETTINGS["weekday_hours"])
         weekend = hours_text(APP_SETTINGS["weekend_hours"])
+        yeonsu_enabled = bool(APP_SETTINGS.get("yeonsu_enabled", True))
+        songdo_enabled = bool(APP_SETTINGS.get("songdo_enabled", False))
     return (
-        f"🎾 코트: <b>{escape(courts)}</b>\n"
+        f"🏟️ 연수문화공원: <b>{'켜짐' if yeonsu_enabled else '꺼짐'}</b>\n"
+        f"🌙 달빛공원(베타): <b>{'켜짐' if songdo_enabled else '꺼짐'}</b>\n"
+        f"🎾 연수 코트: <b>{escape(courts)}</b>\n"
         f"📆 평일: <b>{escape(weekday)}</b>\n"
         f"🌈 주말: <b>{escape(weekend)}</b>\n"
         f"🔁 검사 주기: <b>{CHECK_INTERVAL}초</b>"
@@ -73,12 +78,18 @@ def settings_keyboard() -> dict[str, Any]:
         courts = set(APP_SETTINGS["courts"])
         weekday_all = APP_SETTINGS["weekday_hours"] is None
         weekend_all = APP_SETTINGS["weekend_hours"] is None
+        yeonsu_enabled = bool(APP_SETTINGS.get("yeonsu_enabled", True))
+        songdo_enabled = bool(APP_SETTINGS.get("songdo_enabled", False))
 
     def mark(enabled: bool) -> str:
         return "✅" if enabled else "⬜"
 
     return {
         "inline_keyboard": [
+            [
+                {"text": f"{mark(yeonsu_enabled)} 연수문화공원", "callback_data": "site:yeonsu"},
+                {"text": f"{mark(songdo_enabled)} 달빛공원 β", "callback_data": "site:songdo"},
+            ],
             [
                 {"text": f"{mark('A' in courts)} A코트", "callback_data": "court:A"},
                 {"text": f"{mark('B' in courts)} B코트", "callback_data": "court:B"},
@@ -221,9 +232,23 @@ def monitor_loop() -> None:
                     "courts": list(APP_SETTINGS["courts"]),
                     "weekday_hours": APP_SETTINGS["weekday_hours"],
                     "weekend_hours": APP_SETTINGS["weekend_hours"],
+                    "yeonsu_enabled": bool(APP_SETTINGS.get("yeonsu_enabled", True)),
+                    "songdo_enabled": bool(APP_SETTINGS.get("songdo_enabled", False)),
                 }
 
-            all_slots, errors = get_available_slots_with_status(settings["courts"])
+            all_slots: list[dict[str, Any]] = []
+            errors: list[str] = []
+            if settings["yeonsu_enabled"]:
+                yeonsu_slots, yeonsu_errors = get_available_slots_with_status(settings["courts"])
+                all_slots.extend(yeonsu_slots)
+                errors.extend(yeonsu_errors)
+            if settings["songdo_enabled"]:
+                songdo_slots, songdo_errors = get_songdo_slots_with_status()
+                all_slots.extend(songdo_slots)
+                errors.extend(songdo_errors)
+            if errors:
+                raise RuntimeError(" | ".join(errors))
+
             targets = [slot for slot in all_slots if matches_settings(slot, settings)]
             LAST_TOTAL_SLOTS = len(all_slots)
             LAST_TARGET_COUNT = len(targets)
@@ -234,9 +259,6 @@ def monitor_loop() -> None:
 
             update_slots(targets, initialize=not initialized)
             initialized = True
-
-            if errors:
-                raise RuntimeError(" | ".join(errors))
 
             if error_started_at is not None:
                 duration = max(1, int((now_kst() - error_started_at).total_seconds() // 60))
@@ -300,7 +322,19 @@ def show_settings(message_id: int | None = None) -> None:
 
 def apply_callback(data: str) -> str:
     with STATE_LOCK:
-        if data.startswith("court:"):
+        if data == "site:yeonsu":
+            enabled = not bool(APP_SETTINGS.get("yeonsu_enabled", True))
+            if not enabled and not bool(APP_SETTINGS.get("songdo_enabled", False)):
+                return "감시 사이트는 최소 1개가 필요합니다."
+            APP_SETTINGS["yeonsu_enabled"] = enabled
+            result = f"연수문화공원 감시 {'켬' if enabled else '끔'}"
+        elif data == "site:songdo":
+            enabled = not bool(APP_SETTINGS.get("songdo_enabled", False))
+            if not enabled and not bool(APP_SETTINGS.get("yeonsu_enabled", True)):
+                return "감시 사이트는 최소 1개가 필요합니다."
+            APP_SETTINGS["songdo_enabled"] = enabled
+            result = f"달빛공원 감시 {'켬' if enabled else '끔'}"
+        elif data.startswith("court:"):
             court = data.split(":", 1)[1]
             courts = set(APP_SETTINGS["courts"])
             if court in courts and len(courts) > 1:
@@ -428,7 +462,7 @@ def main() -> None:
         ok = send_telegram_message(f"✅ <b>텔레그램 연결 정상</b>\n{now_str()}")
         raise SystemExit(0 if ok else 1)
 
-    log("START", "ChaenissBot v5 실행")
+    log("START", "ChaenissBot v6 beta 실행")
     log("INFO", settings_text().replace("<b>", "").replace("</b>", "").replace("\n", " | "))
 
     command_thread = threading.Thread(

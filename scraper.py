@@ -90,6 +90,7 @@ def _extract_slots(
         weekday_num = slot_date.weekday()
         slots.append(
             {
+                "site": "yeonsu",
                 "court_code": court_code,
                 "court": court_name,
                 "date_raw": date_value,
@@ -105,11 +106,11 @@ def _extract_slots(
 
 
 def slot_key(slot: dict[str, Any]) -> str:
-    return f"{slot['court_code']}|{slot['date_raw']}|{slot['time_raw']}"
+    return f"{slot.get('site', 'yeonsu')}|{slot['court_code']}|{slot['date_raw']}|{slot['time_raw']}"
 
 
 def matches_settings(slot: dict[str, Any], settings: dict[str, Any]) -> bool:
-    if slot["court_code"] not in settings["courts"]:
+    if slot.get("site", "yeonsu") == "yeonsu" and slot["court_code"] not in settings["courts"]:
         return False
 
     weekday_num = int(slot["weekday_num"])

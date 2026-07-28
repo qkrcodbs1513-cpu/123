@@ -29,6 +29,12 @@ DEFAULT_COURTS = ["A", "B", "C"]
 DEFAULT_WEEKDAY_HOURS = [20]
 DEFAULT_WEEKEND_HOURS: list[int] | None = None  # None = 모든 시간
 
+SONGDO_URL = os.getenv("SONGDO_URL", "https://songdotennis.co.kr/songdo-tennis?tab=reservations").strip()
+SONGDO_ENABLED_DEFAULT = os.getenv("SONGDO_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+SONGDO_COURTS = [x.strip() for x in os.getenv("SONGDO_COURTS", "").split(",") if x.strip()]
+SONGDO_AUTH_STATE = os.getenv("SONGDO_AUTH_STATE", "").strip()
+SONGDO_DEBUG_DIR = os.getenv("SONGDO_DEBUG_DIR", str(DATA_DIR / "songdo_debug"))
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN 환경변수가 없습니다. Railway Variables에 등록하세요.")
 if not CHAT_ID:
