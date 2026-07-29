@@ -41,18 +41,25 @@ def _make_slot(court_num: int, date_raw: str, text: str) -> dict[str, Any] | Non
     }
 
 
-def _select_option_containing(select: Any, text: str) -> bool:
-    options = select.locator("option")
-    for i in range(options.count()):
-        option = options.nth(i)
-        label = (option.inner_text(timeout=300) or "").strip()
-        if text in label:
-            value = option.get_attribute("value")
-            if value is not None:
-                select.select_option(value=value)
-            else:
-                select.select_option(label=label)
-            return True
+def _select_option_containing(select: Any, text: str, timeout_ms: int = 10000) -> bool:
+    elapsed = 0
+    while elapsed < timeout_ms:
+        options = select.locator("option")
+        for i in range(options.count()):
+            option = options.nth(i)
+            try:
+                label = (option.inner_text(timeout=300) or "").strip()
+            except Exception:
+                continue
+            if text in label:
+                value = option.get_attribute("value")
+                if value is not None:
+                    select.select_option(value=value)
+                else:
+                    select.select_option(label=label)
+                return True
+        select.page.wait_for_timeout(250)
+        elapsed += 250
     return False
 
 

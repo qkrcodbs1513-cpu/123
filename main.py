@@ -313,25 +313,23 @@ def update_slots(
     initialize: bool = False,
     preserve_sites: set[str] | None = None,
 ) -> None:
-    """현재 빈자리 상태를 갱신합니다.
-
-    조회에 실패한 사이트는 기존 키를 보존합니다. 따라서 새아침 오류가 나도
-    연수·달빛 알림은 계속 처리되고, 새아침 복구 시 기존 자리를 신규로
-    잘못 재알림하지 않습니다.
-    """
     global LAST_NEW_COUNT
-    preserve_sites = preserve_sites or set()
     current_map = {slot_key(slot): slot for slot in targets}
     current_keys = set(current_map)
+    preserve_sites = preserve_sites or set()
 
     with STATE_LOCK:
         previous_raw = APP_STATE.get("current_keys", [])
         previous_keys = set(previous_raw)
-        preserved_keys = {
-            key for key in previous_keys
-            if key.split("|", 1)[0] in preserve_sites
-        }
-        current_keys |= preserved_keys
+
+    # 실패한 사이트는 이전 키를 그대로 보존합니다.
+    # 한 사이트 오류 때문에 다른 사이트 알림이 막히거나, 복구 후 대량 재알림되는 것을 방지합니다.
+    for key in previous_keys:
+        site = key.split("|", 1)[0]
+        if site in preserve_sites:
+            current_keys.add(key)
+
+    with STATE_LOCK:
         reset_baseline = bool(APP_STATE.pop("reset_baseline", False))
         first_run = initialize or APP_STATE["stats"]["checks"] == 0 or reset_baseline
         APP_STATE["current_keys"] = sorted(current_keys)
@@ -349,7 +347,7 @@ def update_slots(
 
     newly_opened_keys = current_keys - previous_keys
     closed_keys = previous_keys - current_keys
-    newly_opened = [current_map[key] for key in sorted(newly_opened_keys) if key in current_map]
+    newly_opened = [current_map[key] for key in sorted(newly_opened_keys)]
     LAST_NEW_COUNT = len(newly_opened)
 
     if newly_opened:
@@ -401,29 +399,29 @@ def monitor_loop() -> None:
             errors: list[str] = []
             failed_sites: set[str] = set()
 
-            collectors = []
             if settings["yeonsu_enabled"]:
-                collectors.append(("yeonsu", "연수문화공원", lambda: get_available_slots_with_status(settings["courts"])))
-            if settings["songdo_enabled"]:
-                collectors.append(("songdo", "달빛공원", get_songdo_slots_with_status))
-            if settings["saeachim_enabled"]:
-                collectors.append(("saeachim", "새아침테니스장", lambda: get_saeachim_slots_with_status(settings["saeachim_courts"])))
+                yeonsu_slots, yeonsu_errors = get_available_slots_with_status(settings["courts"])
+                all_slots.extend(yeonsu_slots)
+                if yeonsu_errors:
+                    failed_sites.add("yeonsu")
+                    errors.extend(yeonsu_errors)
 
-            for site_key, site_name, collector in collectors:
-                try:
-                    site_slots, site_errors = collector()
-                    all_slots.extend(site_slots)
-                    if site_errors:
-                        failed_sites.add(site_key)
-                        errors.extend(site_errors)
-                        log("WARN", f"{site_name} 조회 일부/전체 실패 — 다른 사이트는 계속 처리")
-                except Exception as exc:
-                    failed_sites.add(site_key)
-                    message = f"{site_name}: {type(exc).__name__} - {exc}"
-                    errors.append(message)
-                    log("WARN", f"{message} — 다른 사이트는 계속 처리")
+            if settings["songdo_enabled"]:
+                songdo_slots, songdo_errors = get_songdo_slots_with_status()
+                all_slots.extend(songdo_slots)
+                if songdo_errors:
+                    failed_sites.add("songdo")
+                    errors.extend(songdo_errors)
+
+            if settings["saeachim_enabled"]:
+                saeachim_slots, saeachim_errors = get_saeachim_slots_with_status(settings["saeachim_courts"])
+                all_slots.extend(saeachim_slots)
+                if saeachim_errors:
+                    failed_sites.add("saeachim")
+                    errors.extend(saeachim_errors)
 
             targets = [slot for slot in all_slots if matches_settings(slot, settings)]
+
             songdo_targets = [s for s in targets if s.get("site") == "songdo"]
             yeonsu_targets = [s for s in targets if s.get("site") == "yeonsu"]
             saeachim_targets = [s for s in targets if s.get("site") == "saeachim"]
@@ -443,18 +441,19 @@ def monitor_loop() -> None:
 
             if errors:
                 LAST_ERROR = " | ".join(errors)
+                log("WARN", f"일부 사이트 조회 실패 — 나머지 사이트는 계속 처리: {LAST_ERROR}")
                 with STATE_LOCK:
                     APP_STATE["stats"]["errors"] += 1
                 persist()
                 if error_started_at is None:
                     error_started_at = now_kst()
-                elapsed_minutes = (now_kst() - error_started_at).total_seconds() / 60
-                if elapsed_minutes >= ERROR_ALERT_MINUTES and not error_alert_sent:
+                elapsed_error = (now_kst() - error_started_at).total_seconds() / 60
+                if elapsed_error >= ERROR_ALERT_MINUTES and not error_alert_sent:
                     send_telegram_message(
-                        "⚠️ <b>일부 사이트 조회 오류</b>\n\n"
-                        f"{escape(LAST_ERROR[:3000])}\n\n"
-                        "정상 사이트 감시와 알림은 계속됩니다.\n"
-                        f"⏰ {now_str()}"
+                        "⚠️ <b>일부 사이트 조회 오류 지속</b>\n\n"
+                        f"지속 시간: 약 {int(elapsed_error)}분\n"
+                        f"내용: {escape(LAST_ERROR)}\n\n"
+                        "정상인 사이트 감시와 알림은 계속됩니다."
                     )
                     error_alert_sent = True
             else:
@@ -478,23 +477,42 @@ def monitor_loop() -> None:
                 send_telegram_message("💚 <b>정상 작동 중</b>\n\n" + status_text())
                 next_heartbeat = now_kst() + timedelta(hours=HEARTBEAT_HOURS)
 
-            level = "WARN" if errors else "OK"
-            failed_text = f" | 실패 {','.join(sorted(failed_sites))}" if failed_sites else ""
             log(
-                level,
-                f"전체 {LAST_TOTAL_SLOTS} | 조건 연수 {LAST_YEONSU_TARGETS}·달빛 {LAST_SONGDO_TARGETS}·새아침 {LAST_SAEACHIM_TARGETS} | 신규 {LAST_NEW_COUNT}{failed_text} | {CHECK_INTERVAL}초 후",
+                "OK",
+                f"전체 {LAST_TOTAL_SLOTS} | 조건 연수 {LAST_YEONSU_TARGETS}·달빛 {LAST_SONGDO_TARGETS}·새아침 {LAST_SAEACHIM_TARGETS} | 신규 {LAST_NEW_COUNT} | {CHECK_INTERVAL}초 후",
             )
 
         except Exception as exc:
             LAST_ERROR = f"{type(exc).__name__}: {exc}"
             log("ERROR", LAST_ERROR)
-            traceback.print_exc()
             with STATE_LOCK:
                 APP_STATE["stats"]["errors"] += 1
             persist()
 
+            if error_started_at is None:
+                error_started_at = now_kst()
+
+            elapsed_error = (now_kst() - error_started_at).total_seconds() / 60
+            if elapsed_error >= ERROR_ALERT_MINUTES and not error_alert_sent:
+                send_telegram_message(
+                    "⚠️ <b>ChaenissBot 오류 지속</b>\n\n"
+                    f"지속 시간: 약 {int(elapsed_error)}분\n"
+                    f"내용: {escape(LAST_ERROR)}\n\n"
+                    "봇은 멈추지 않고 자동 재시도합니다."
+                )
+                error_alert_sent = True
+
         elapsed = time.monotonic() - started
-        time.sleep(max(1.0, CHECK_INTERVAL - elapsed))
+        time.sleep(max(1, CHECK_INTERVAL - elapsed))
+
+
+def show_settings(message_id: int | None = None) -> None:
+    text = "⚙️ <b>알림 설정</b>\n\n버튼을 누르면 즉시 변경됩니다.\n\n" + settings_text()
+    keyboard = settings_keyboard()
+    if message_id is None:
+        send_telegram_message(text, keyboard)
+    else:
+        edit_telegram_message(message_id, text, keyboard)
 
 
 def apply_callback(data: str) -> str:
@@ -741,7 +759,7 @@ def main() -> None:
         ok = send_telegram_message(f"✅ <b>텔레그램 연결 정상</b>\n{now_str()}")
         raise SystemExit(0 if ok else 1)
 
-    log("START", "ChaenissBot v7 STABLE 실행")
+    log("START", "ChaenissBot v7.1 새아침 안정 추가 실행")
     log("INFO", settings_text().replace("<b>", "").replace("</b>", "").replace("\n", " | "))
 
     command_thread = threading.Thread(

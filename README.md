@@ -79,13 +79,9 @@ Trigger Railway redeploy
 ## v6.5 FAST RECOVERY
 `facility_map.json`이 없으면 5~17번 코트 상세를 한 번씩만 열어 Convex WebSocket에서 시설 ID를 수집합니다. 완료 즉시 API 조회로 전환하며, 실패하면 기존 DOM 방식으로 자동 복구합니다.
 
+---
+
 ## v7.1 새아침테니스장
 
-새아침테니스장 1~4코트의 공개 예약 달력에서 예약 가능한 시간만 감시합니다.
-Telegram `/settings`에서 새아침 사용 여부, 코트, 평일/주말 시간을 따로 설정할 수 있습니다.
-빈자리 알림의 `예약하기` 링크를 누르면 인천시설공단 예약 페이지가 열리며, 로그인 후 직접 예약을 완료합니다.
-
-기본 URL은 다음과 같으며 Railway 변수로 변경할 수 있습니다.
-
-- `SAEACHIM_URL=https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07`
-- `SAEACHIM_ENABLED=true`
+이 버전은 기존 연수문화공원·달빛공원 완성본에 새아침테니스장 1~4코트 감시만 추가한 버전입니다.
+새아침 조회가 실패해도 기존 두 사이트 감시와 알림은 계속됩니다.

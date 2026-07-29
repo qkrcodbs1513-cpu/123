@@ -42,6 +42,6 @@ if not CHAT_ID:
 
 SAEACHIM_URL = os.getenv(
     "SAEACHIM_URL",
-    "https://reserve.insiseol.or.kr/rent/rentalSchedule?up_id=07",
+    "https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07",
 ).strip()
 SAEACHIM_ENABLED_DEFAULT = os.getenv("SAEACHIM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
