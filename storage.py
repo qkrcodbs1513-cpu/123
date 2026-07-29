@@ -28,6 +28,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "songdo_weekend_hours": DEFAULT_WEEKEND_HOURS,
     "yeonsu_enabled": True,
     "songdo_enabled": SONGDO_ENABLED_DEFAULT,
+    "songdo_courts": list(range(5, 15)),
+    "songdo_surfaces": ["hard", "artificial"],
 }
 
 DEFAULT_STATE: dict[str, Any] = {
@@ -76,6 +78,9 @@ def load_settings() -> dict[str, Any]:
     data["courts"] = courts or ["A", "B", "C"]
     data["yeonsu_enabled"] = bool(data.get("yeonsu_enabled", True))
     data["songdo_enabled"] = bool(data.get("songdo_enabled", SONGDO_ENABLED_DEFAULT))
+    data["songdo_courts"] = sorted({int(x) for x in data.get("songdo_courts", range(5, 15)) if 5 <= int(x) <= 14}) or list(range(5, 15))
+    allowed_surfaces = {"hard", "artificial"}
+    data["songdo_surfaces"] = sorted({str(x) for x in data.get("songdo_surfaces", allowed_surfaces) if str(x) in allowed_surfaces}) or ["hard", "artificial"]
     if not data["yeonsu_enabled"] and not data["songdo_enabled"]:
         data["yeonsu_enabled"] = True
 

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -264,7 +265,14 @@ def _collect_with_convex_api(page: Any, facilities: dict[int, str]) -> tuple[lis
 
 
 def _log(message: str) -> None:
-    print(f"[DALBIT] {message}", flush=True)
+    debug = os.getenv("DALBIT_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+    important = (
+        "저장된 facility_map.json 사용", "API 조회:", "API 조회 완료",
+        "수집 종료:", "facility_map 10개 완성", "API 조회 예외",
+        "API 전환 미완료", "달빛공원 API"
+    )
+    if debug or any(token in message for token in important):
+        print(f"[DALBIT] {message}", flush=True)
 
 
 def _load_storage_state() -> dict[str, Any] | None:
@@ -1170,7 +1178,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.7 STABLE ENTRY 시작 — v6.5 진입 유지, 5~14번, 코트 재질 표시")
+        _log("v7.0 API FINAL 시작 — 5~14번, 코트·재질 필터, 간결 로그")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}

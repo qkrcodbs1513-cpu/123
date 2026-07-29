@@ -110,10 +110,20 @@ def slot_key(slot: dict[str, Any]) -> str:
 
 
 def matches_settings(slot: dict[str, Any], settings: dict[str, Any]) -> bool:
-    if slot.get("site", "yeonsu") == "yeonsu" and slot["court_code"] not in settings["courts"]:
-        return False
-
     site = slot.get("site", "yeonsu")
+    if site == "yeonsu" and slot["court_code"] not in settings["courts"]:
+        return False
+    if site == "songdo":
+        try:
+            court_num = int(str(slot.get("court_code", "S00")).lstrip("S"))
+        except ValueError:
+            return False
+        if court_num not in settings.get("songdo_courts", list(range(5, 15))):
+            return False
+        surface = "hard" if 5 <= court_num <= 8 else "artificial"
+        if surface not in settings.get("songdo_surfaces", ["hard", "artificial"]):
+            return False
+
     weekday_num = int(slot["weekday_num"])
     start_hour = int(slot["start_hour"])
     prefix = "songdo" if site == "songdo" else "yeonsu"
