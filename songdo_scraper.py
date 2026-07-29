@@ -30,8 +30,7 @@ COURT_SURFACES = {**{n: "하드코트" for n in range(5, 9)}, **{n: "인조잔�
 
 
 def _court_label(court_num: int) -> str:
-    surface = COURT_SURFACES.get(court_num, "코트")
-    return f"달빛공원 {court_num}번 코트 ({surface})"
+    return f"달빛공원 {court_num}번 코트 ({COURT_SURFACES.get(court_num, '코트')})"
 
 # Convex 공개 API. 첫 정상 DOM 수집 때 코트명↔facilityId를 함께 저장하고,
 # 다음 검사부터 API를 우선 사용합니다. API가 실패하면 기존 DOM 방식으로 자동 복귀합니다.
@@ -1171,7 +1170,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.6 FAST ALERT 시작 — 5~14번, 코트 재질 표시, ID 수집과 즉시 조회 병행")
+        _log("v6.7 STABLE ENTRY 시작 — v6.5 진입 유지, 5~14번, 코트 재질 표시")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
@@ -1185,104 +1184,103 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
 
             _goto_songdo(page)
             facilities = _load_facility_map()
-            checked_courts: set[int] = set()
-            convex_ready = _wait_for_convex(page)
+            api_used = False
 
-            # 저장된 일부 ID도 전체 맵 완성을 기다리지 않고 즉시 조회합니다.
-            if facilities and convex_ready:
-                existing = {n: fid for n, fid in facilities.items() if n in TARGET_COURTS}
-                if existing:
-                    _log(f"저장된 facilityId {len(existing)}개 우선 API 조회")
-                    try:
-                        api_slots, api_errors = _collect_with_convex_api(page, existing)
+            # facility_map이 완성된 경우 코트/달력 클릭 없이 바로 API 조회합니다.
+            if len(facilities) == len(TARGET_COURTS) and _wait_for_convex(page):
+                _log(f"저장된 facility_map.json 사용 — {len(facilities)}개 코트")
+                try:
+                    api_slots, api_errors = _collect_with_convex_api(page, facilities)
+                    # API 호출 자체가 전부 실패한 경우에는 기존 DOM 방식으로 안전하게 복귀합니다.
+                    fatal_api = bool(api_errors) and not api_slots and len(api_errors) >= 2
+                    if not fatal_api:
                         slots.extend(api_slots)
                         errors.extend(api_errors)
-                        checked_courts.update(existing)
-                        _log(f"저장 ID 우선 조회 완료 — 가능 슬롯 {len(api_slots)}개")
-                    except Exception as exc:
-                        _log(f"저장 ID API 조회 실패 — DOM으로 복구: {type(exc).__name__}: {exc}")
-
-            _ensure_list(page)
-            missing_before = [n for n in TARGET_COURTS if n not in facilities]
-            if missing_before:
-                _log(f"누락 facilityId {len(missing_before)}개 수집 시작 — 코트별 즉시 빈자리 조회")
-
-            for court_num in missing_before:
-                opened = False
-                try:
-                    _ensure_list(page)
-                    websocket_facility_ids.clear()
-                    _log(f"{court_num}번: facilityId 수집용 상세 진입")
-                    _open_court(page, court_num, debug_dir)
-                    opened = True
-                    facility_id = ""
-                    if _poll(
-                        page,
-                        lambda: bool(_latest_websocket_facility_id(websocket_facility_ids)),
-                        5000,
-                        step_ms=100,
-                    ):
-                        facility_id = _latest_websocket_facility_id(websocket_facility_ids)
-                    if not facility_id and _wait_for_convex(page, timeout_ms=1500):
-                        try:
-                            _install_facility_probe(page)
-                            if _poll(page, lambda: bool(_latest_probed_facility_id(page)), 1500, step_ms=100):
-                                facility_id = _latest_probed_facility_id(page)
-                        except Exception:
-                            pass
-
-                    if facility_id:
-                        facilities[court_num] = facility_id
-                        _save_facility_map(facilities)
-                        _log(f"facilityId 저장: {court_num}번={facility_id}")
-                        if _wait_for_convex(page, timeout_ms=2000):
-                            try:
-                                one_slots, one_errors = _collect_with_convex_api(page, {court_num: facility_id})
-                                slots.extend(one_slots)
-                                errors.extend(one_errors)
-                                checked_courts.add(court_num)
-                                _log(f"{court_num}번 즉시 API 조회 완료 — 가능 슬롯 {len(one_slots)}개")
-                            except Exception as exc:
-                                _log(f"{court_num}번 즉시 API 실패 — 현재 상세 화면 DOM 조회: {type(exc).__name__}: {exc}")
+                        api_used = True
+                        _log(f"API 조회 완료 — 가능 슬롯 {len(api_slots)}개")
                     else:
-                        _log(f"facilityId 미확인: {court_num}번 — 현재 상세 화면에서 바로 조회")
-
-                    if court_num not in checked_courts:
-                        _collect_court_dates_and_times(page, court_num, slots, errors)
-                        checked_courts.add(court_num)
-                    _return_to_list(page)
-                    opened = False
+                        _log("API 조회가 정상 완료되지 않아 기존 DOM 방식으로 자동 복귀")
                 except Exception as exc:
-                    errors.append(f"달빛공원 {court_num}번 ID/빈자리 수집: {type(exc).__name__} - {exc}")
-                    try:
-                        if opened:
-                            _return_to_list(page)
-                        _ensure_list(page, timeout_ms=10000)
-                    except Exception:
-                        _goto_songdo(page)
+                    _log(f"API 조회 예외 — 기존 DOM 방식으로 자동 복귀: {type(exc).__name__}: {exc}")
 
-            # 아직 확인하지 못한 코트만 DOM으로 보완합니다. 전체 코트를 다시 훑지 않습니다.
-            remaining = [n for n in TARGET_COURTS if n not in checked_courts]
-            if remaining:
+            if not api_used:
+                # ID가 아직 없으면 날짜 전체를 훑기 전에 코트만 빠르게 한 번씩 열어
+                # WebSocket 요청에서 facilityId를 수집합니다.
                 _ensure_list(page)
-                _log(f"미확인 코트 {len(remaining)}개만 DOM 보완 조회: {remaining}")
-                for court_num in remaining:
+                _log("코트 목록 확인 완료 — facilityId 빠른 수집 시작")
+
+                missing_before = [n for n in TARGET_COURTS if n not in facilities]
+                for court_num in missing_before:
                     try:
                         _ensure_list(page)
+                        websocket_facility_ids.clear()
+                        _log(f"{court_num}번: facilityId 수집용 상세 진입")
+                        _open_court(page, court_num, debug_dir)
+                        facility_id = ""
+                        if _poll(
+                            page,
+                            lambda: bool(_latest_websocket_facility_id(websocket_facility_ids)),
+                            5000,
+                            step_ms=100,
+                        ):
+                            facility_id = _latest_websocket_facility_id(websocket_facility_ids)
+                        # WebSocket 관찰이 비어 있을 때 기존 JS 후크도 보조로 한 번 확인합니다.
+                        if not facility_id and _wait_for_convex(page, timeout_ms=1500):
+                            try:
+                                _install_facility_probe(page)
+                                if _poll(page, lambda: bool(_latest_probed_facility_id(page)), 1500, step_ms=100):
+                                    facility_id = _latest_probed_facility_id(page)
+                            except Exception:
+                                pass
+                        if facility_id:
+                            facilities[court_num] = facility_id
+                            _save_facility_map(facilities)
+                            _log(f"facilityId 저장: {court_num}번={facility_id}")
+                        else:
+                            _log(f"facilityId 미확인: {court_num}번")
+                        _return_to_list(page)
+                    except Exception as exc:
+                        errors.append(f"달빛공원 {court_num}번 ID 수집: {type(exc).__name__} - {exc}")
+                        try:
+                            _ensure_list(page, timeout_ms=10000)
+                        except Exception:
+                            _goto_songdo(page)
+
+                if len(facilities) == len(TARGET_COURTS) and _wait_for_convex(page):
+                    _log("facility_map 10개 완성 — 같은 검사에서 즉시 API 조회")
+                    try:
+                        api_slots, api_errors = _collect_with_convex_api(page, facilities)
+                        fatal_api = bool(api_errors) and not api_slots and len(api_errors) >= 2
+                        if not fatal_api:
+                            slots.extend(api_slots)
+                            errors.extend(api_errors)
+                            api_used = True
+                            _log(f"API 조회 완료 — 가능 슬롯 {len(api_slots)}개")
+                    except Exception as exc:
+                        _log(f"즉시 API 조회 실패 — 기존 DOM으로 복구: {type(exc).__name__}: {exc}")
+
+            if not api_used:
+                # ID 수집 또는 API가 실패한 경우에만 검증된 v6.1.17 DOM 수집으로 복구합니다.
+                _ensure_list(page)
+                _log("API 전환 미완료 — 기존 DOM 알림 수집으로 자동 복구")
+                for court_num in TARGET_COURTS:
+                    try:
+                        _ensure_list(page)
+                        _log(f"{court_num}번: 상세 화면 진입 시도")
                         _open_court(page, court_num, debug_dir)
                         _collect_court_dates_and_times(page, court_num, slots, errors)
-                        checked_courts.add(court_num)
                         _return_to_list(page)
+                        _ensure_list(page)
                     except Exception as exc:
                         errors.append(f"달빛공원 {court_num}번: {type(exc).__name__} - {exc}")
                         _save_debug(page, debug_dir, f"dalbit_error_court_{court_num}")
                         try:
                             _ensure_list(page, timeout_ms=10000)
                         except Exception:
-                            _goto_songdo(page)
-
-            if len(facilities) == len(TARGET_COURTS):
-                _log(f"facility_map {len(TARGET_COURTS)}개 완성 — 다음 검사부터 전 코트 API 우선")
+                            try:
+                                _goto_songdo(page)
+                            except Exception:
+                                pass
 
             try:
                 context.storage_state(path=str(debug_dir / "songdo_storage_state.json"))
