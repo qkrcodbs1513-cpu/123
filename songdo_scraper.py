@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from config import REQUEST_TIMEOUT, SONGDO_AUTH_STATE, SONGDO_DEBUG_DIR, SONGDO_URL
+from config import DATA_DIR, REQUEST_TIMEOUT, SONGDO_AUTH_STATE, SONGDO_DEBUG_DIR, SONGDO_URL
 
 KST = timezone(timedelta(hours=9))
 WEEKDAYS_KO = ["월", "화", "수", "목", "금", "토", "일"]
@@ -25,17 +25,15 @@ TIME_RE = re.compile(
     r"(?P<eh>\d{1,2}):(?P<em>\d{2})"
 )
 AVAIL_RE = re.compile(r"(?P<available>\d+)\s*/\s*(?P<total>\d+)\s*예약\s*가능")
-TARGET_COURTS = tuple(range(5, 15))
+TARGET_COURTS = tuple(range(5, 18))
 
 
-# Convex 공개 API. 브라우저는 사이트 앱과 Convex 클라이언트를 로드하는 역할만 하며,
-# 날짜/코트 클릭 대신 아래 쿼리로 예약 데이터를 직접 읽습니다.
+# Convex 공개 API 설정. 시설 ID는 최초 1회 코트 카드만 눌러 자동 수집하고,
+# 이후 검사부터는 달력/날짜/시간 버튼을 전혀 누르지 않습니다.
 MONTH_QUERY = "slots/queries:getMonthSlotCountsPublic"
 SLOT_QUERY = "slots/queries:listByFacilityAndDatePublic"
 TENANT_SLUG = "songdo-tennis"
-KNOWN_FACILITIES: dict[int, str] = {
-    5: "m9787fez1x2bp21pqr0x8dvx317x9qf9",
-}
+FACILITY_MAP_FILE = DATA_DIR / "facility_map.json"
 
 
 def _month_keys(start: date, count: int = 2) -> list[str]:
@@ -81,51 +79,115 @@ def _convex_query(page: Any, query_name: str, args: dict[str, Any]) -> Any:
     )
 
 
-def _discover_facilities_from_cache(page: Any) -> dict[int, str]:
-    """Convex 원격 쿼리 캐시를 재귀 순회해 'n번 코트'와 facilityId를 찾습니다."""
-    rows = page.evaluate(
+def _load_facility_map() -> dict[int, str]:
+    if not FACILITY_MAP_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(FACILITY_MAP_FILE.read_text(encoding="utf-8"))
+        result: dict[int, str] = {}
+        for key, value in raw.items():
+            number = int(key)
+            facility_id = str(value).strip()
+            if number in TARGET_COURTS and facility_id:
+                result[number] = facility_id
+        return result
+    except Exception as exc:
+        _log(f"facility_map.json 읽기 실패 — 다시 수집합니다: {type(exc).__name__}: {exc}")
+        return {}
+
+
+def _save_facility_map(facilities: dict[int, str]) -> None:
+    FACILITY_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {str(number): facility_id for number, facility_id in sorted(facilities.items())}
+    temp = FACILITY_MAP_FILE.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(FACILITY_MAP_FILE)
+
+
+def _install_facility_probe(page: Any) -> None:
+    page.evaluate(
         """() => {
           const root = document.querySelector('#__nuxt');
           const app = root && root.__vue_app__;
           const provided = app && app._context && app._context.provides;
           const plugin = provided && provided['convex-vue'];
           const client = plugin && plugin.clientRef && plugin.clientRef.value;
-          const inner = client && (client._client || client.client);
-          const map = inner && inner.remoteQuerySet && inner.remoteQuerySet.remoteQuerySet;
-          if (!(map instanceof Map)) return [];
-
-          const found = new Map();
-          const seen = new Set();
-          function walk(v, depth) {
-            if (v == null || depth > 8) return;
-            if ((typeof v === 'object' || typeof v === 'function') && seen.has(v)) return;
-            if (typeof v === 'object' || typeof v === 'function') seen.add(v);
-            if (Array.isArray(v)) { v.forEach(x => walk(x, depth + 1)); return; }
-            if (v instanceof Map) { for (const [k, x] of v) { walk(k, depth+1); walk(x, depth+1); } return; }
-            if (typeof v !== 'object') return;
-
-            const id = typeof v.facilityId === 'string' ? v.facilityId
-                     : (typeof v._id === 'string' && /facility/i.test(String(v.type || v.kind || '')) ? v._id : null);
-            const name = [v.facilityName, v.name, v.title].find(x => typeof x === 'string' && /\d+번\s*코트/.test(x));
-            if (id && name) found.set(id, name);
-            for (const key of Reflect.ownKeys(v)) {
-              try { walk(v[key], depth + 1); } catch (_) {}
-            }
-          }
-          for (const q of map.values()) walk(q, 0);
-          return [...found.entries()].map(([facilityId, facilityName]) => ({facilityId, facilityName}));
+          if (!client || typeof client.query !== 'function') throw new Error('Convex client unavailable');
+          window.__chaenissFacilityCalls = [];
+          if (client.__chaenissFacilityHookInstalled) return;
+          const original = client.query.bind(client);
+          client.query = async (...args) => {
+            try {
+              const payload = args[1];
+              if (payload && typeof payload.facilityId === 'string') {
+                window.__chaenissFacilityCalls.push({
+                  facilityId: payload.facilityId,
+                  at: Date.now()
+                });
+              }
+            } catch (_) {}
+            return await original(...args);
+          };
+          client.__chaenissFacilityHookInstalled = true;
         }"""
     )
-    result: dict[int, str] = dict(KNOWN_FACILITIES)
-    for row in rows or []:
-        name = str(row.get("facilityName", ""))
-        match = re.search(r"(\d+)번\s*코트", name)
-        facility_id = str(row.get("facilityId", ""))
-        if match and facility_id:
-            number = int(match.group(1))
-            if number in TARGET_COURTS:
-                result[number] = facility_id
-    return result
+
+
+def _latest_probed_facility_id(page: Any) -> str:
+    value = page.evaluate(
+        """() => {
+          const rows = window.__chaenissFacilityCalls || [];
+          return rows.length ? rows[rows.length - 1].facilityId : '';
+        }"""
+    )
+    return str(value or "").strip()
+
+
+def _clear_facility_probe(page: Any) -> None:
+    page.evaluate("() => { window.__chaenissFacilityCalls = []; }")
+
+
+def _collect_facility_map_once(
+    page: Any, debug_dir: Path, existing: dict[int, str] | None = None
+) -> dict[int, str]:
+    facilities = dict(existing or {})
+    missing = [number for number in TARGET_COURTS if number not in facilities]
+    if not missing:
+        return facilities
+
+    _ensure_list(page)
+    _wait_for_convex(page)
+    _install_facility_probe(page)
+    _log(f"facilityId 최초 수집 시작 — 코트 카드 {len(missing)}개만 1회 확인")
+
+    for court_num in missing:
+        try:
+            _ensure_list(page)
+            _clear_facility_probe(page)
+            _open_court(page, court_num, debug_dir)
+            facility_id = ""
+            if _poll(page, lambda: bool(_latest_probed_facility_id(page)), 5000, step_ms=150):
+                facility_id = _latest_probed_facility_id(page)
+            if not facility_id:
+                raise RuntimeError("클릭 후 facilityId 호출을 잡지 못했습니다.")
+            facilities[court_num] = facility_id
+            _save_facility_map(facilities)
+            _log(f"facilityId 저장: {court_num}번={facility_id}")
+        except Exception as exc:
+            _log(f"facilityId 수집 실패 {court_num}번: {type(exc).__name__}: {exc}")
+            _save_debug(page, debug_dir, f"facility_probe_{court_num}_error")
+        finally:
+            try:
+                _return_to_list(page)
+            except Exception:
+                try:
+                    _goto_songdo(page)
+                    _ensure_list(page)
+                except Exception:
+                    pass
+
+    _save_facility_map(facilities)
+    return facilities
 
 
 def _slot_from_api(court_num: int, raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -154,7 +216,9 @@ def _slot_from_api(court_num: int, raw: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
-def _collect_with_convex_api(page: Any, facilities: dict[int, str]) -> tuple[list[dict[str, Any]], list[str]]:
+def _collect_with_convex_api(
+    page: Any, facilities: dict[int, str]
+) -> tuple[list[dict[str, Any]], list[str]]:
     slots: list[dict[str, Any]] = []
     errors: list[str] = []
     today = datetime.now(KST).date()
@@ -162,7 +226,9 @@ def _collect_with_convex_api(page: Any, facilities: dict[int, str]) -> tuple[lis
 
     for month in _month_keys(today, 2):
         try:
-            counts = _convex_query(page, MONTH_QUERY, {"month": month, "tenantSlug": TENANT_SLUG})
+            counts = _convex_query(
+                page, MONTH_QUERY, {"month": month, "tenantSlug": TENANT_SLUG}
+            )
             for date_raw, count in (counts or {}).items():
                 if str(date_raw) < today.isoformat():
                     continue
@@ -171,15 +237,19 @@ def _collect_with_convex_api(page: Any, facilities: dict[int, str]) -> tuple[lis
         except Exception as exc:
             errors.append(f"달빛공원 {month} 월별 API: {type(exc).__name__} - {exc}")
 
-    _log(f"Convex API 대상: 코트 {len(facilities)}개, 예약 가능 표시 날짜 {len(dates)}개")
+    _log(f"API 조회: 코트 {len(facilities)}개 × 후보 날짜 {len(dates)}개")
     for court_num, facility_id in sorted(facilities.items()):
         for date_raw in sorted(dates):
             try:
-                raw_slots = _convex_query(page, SLOT_QUERY, {
-                    "date": date_raw,
-                    "facilityId": facility_id,
-                    "tenantSlug": TENANT_SLUG,
-                })
+                raw_slots = _convex_query(
+                    page,
+                    SLOT_QUERY,
+                    {
+                        "date": date_raw,
+                        "facilityId": facility_id,
+                        "tenantSlug": TENANT_SLUG,
+                    },
+                )
                 for raw in raw_slots or []:
                     if bool(raw.get("isBooked")):
                         continue
@@ -191,7 +261,9 @@ def _collect_with_convex_api(page: Any, facilities: dict[int, str]) -> tuple[lis
                     if slot:
                         slots.append(slot)
             except Exception as exc:
-                errors.append(f"달빛공원 {court_num}번 {date_raw} API: {type(exc).__name__} - {exc}")
+                errors.append(
+                    f"달빛공원 {court_num}번 {date_raw} API: {type(exc).__name__} - {exc}"
+                )
     return slots, errors
 
 
@@ -1102,7 +1174,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.2 CONVEX-API 시작 — 달력/날짜 클릭 없는 API 우선 수집")
+        _log("v6.3 API-ONLY 시작 — 최초 1회 시설 ID 저장 후 클릭 없이 조회")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
@@ -1116,35 +1188,21 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
             _goto_songdo(page)
             _wait_for_convex(page)
 
-            # 목록 화면을 한 번 렌더링해 시설 쿼리 결과가 Convex 캐시에 들어오게 합니다.
-            try:
-                _ensure_list(page)
-            except Exception as exc:
-                _log(f"코트 목록 렌더링 실패(공개 API는 계속 시도): {type(exc).__name__}: {exc}")
+            facilities = _load_facility_map()
+            if len(facilities) < len(TARGET_COURTS):
+                facilities = _collect_facility_map_once(page, debug_dir, facilities)
+            else:
+                _log(f"저장된 facility_map.json 사용 — {len(facilities)}개 코트")
 
-            facilities = _discover_facilities_from_cache(page)
-            _log("발견 facilityId: " + ", ".join(f"{n}번={fid}" for n, fid in sorted(facilities.items())))
+            missing = [number for number in TARGET_COURTS if number not in facilities]
+            if missing:
+                _log(f"아직 facilityId가 없는 코트: {missing} — 다음 검사에서 다시 수집")
+            if not facilities:
+                raise RuntimeError("수집된 facilityId가 하나도 없습니다.")
 
             api_slots, api_errors = _collect_with_convex_api(page, facilities)
             slots.extend(api_slots)
             errors.extend(api_errors)
-
-            missing_courts = [n for n in TARGET_COURTS if n not in facilities]
-            if missing_courts:
-                _log(f"facilityId 미발견 코트 {missing_courts} — 기존 DOM 방식으로만 보완")
-                for court_num in missing_courts:
-                    try:
-                        _ensure_list(page)
-                        _open_court(page, court_num, debug_dir)
-                        _collect_court_dates_and_times(page, court_num, slots, errors)
-                        _return_to_list(page)
-                    except Exception as exc:
-                        errors.append(f"달빛공원 {court_num}번 보완: {type(exc).__name__} - {exc}")
-                        _save_debug(page, debug_dir, f"dalbit_error_court_{court_num}")
-                        try:
-                            _goto_songdo(page)
-                        except Exception:
-                            pass
 
             try:
                 context.storage_state(path=str(debug_dir / "songdo_storage_state.json"))
@@ -1159,4 +1217,3 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     result = sorted(unique.values(), key=lambda s: (s["date_raw"], s["start_hour"], s["court_code"]))
     _log(f"수집 종료: 가능 슬롯 {len(result)}개, 오류 {len(errors)}개")
     return result, errors
-

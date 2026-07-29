@@ -59,10 +59,11 @@
 - 코트 예약 버튼은 DOM click을 우선 사용해 포인터 가로채기 타임아웃을 피합니다.
 - 목록 복귀가 확인되지 않으면 예약 URL을 다시 접속합니다.
 
-## v6.2 Convex API
-- 달빛공원 월별 예약 현황을 `slots/queries:getMonthSlotCountsPublic`로 직접 조회합니다.
-- 코트·날짜별 시간 슬롯을 `slots/queries:listByFacilityAndDatePublic`로 직접 조회합니다.
-- `isBooked == false`, `cartHeldByAnyone == false`, `isPast == false`인 슬롯만 알림 대상으로 처리합니다.
-- 브라우저의 Convex 쿼리 캐시에서 코트명과 `facilityId`를 자동 수집합니다.
-- `facilityId`를 찾지 못한 코트만 기존 DOM 클릭 방식으로 보완합니다.
-- 달빛공원 5번 코트의 확인된 `facilityId`를 기본값으로 포함했습니다.
+## v6.3 API-ONLY FACILITY MAP
+- 달빛공원 코트 범위를 5~17번으로 확장했습니다.
+- `facility_map.json`이 없을 때만 코트 카드를 1회씩 열어 실제 Convex `facilityId`를 자동 수집합니다.
+- 수집 중 브라우저의 `client.query` 인자를 가로채 코트명과 `facilityId`를 정확히 연결합니다.
+- 매 코트 ID를 찾는 즉시 `DATA_DIR/facility_map.json`에 안전하게 저장합니다.
+- 이후 검사에서는 달력, 날짜, 시간 버튼을 누르지 않고 Convex 공개 API만 호출합니다.
+- 일부 코트 수집이 실패하면 다음 검사에서 누락 코트만 다시 시도합니다.
+- 기존 연수문화공원 알림, 텔레그램 설정, 중복 방지 로직은 그대로 유지합니다.
