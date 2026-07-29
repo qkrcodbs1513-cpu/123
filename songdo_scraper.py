@@ -3,7 +3,7 @@
 실제 Prime Reserve DOM 구조를 기준으로 동작합니다.
 - 현재 화면이 목록인지 상세인지 먼저 판별
 - 상세 화면이면 aria-label="목록으로" 버튼으로 복귀
-- 목록 화면에서 5~14번 코트를 텍스트 기준으로 찾음
+- 목록 화면에서 5~17번 코트를 텍스트 기준으로 찾음
 - 각 코트 상세 화면의 button[data-date-key]와 title="n/m 예약 가능"을 사용
 - 예약 가능한 날짜만 클릭하고 시간대 버튼을 읽음
 - 특정 코트가 실패해도 다음 코트로 계속 진행
@@ -27,9 +27,8 @@ TIME_RE = re.compile(
 AVAIL_RE = re.compile(r"(?P<available>\d+)\s*/\s*(?P<total>\d+)\s*예약\s*가능")
 TARGET_COURTS = tuple(range(5, 18))
 
-
-# Convex 공개 API 설정. 시설 ID는 최초 1회 코트 카드만 눌러 자동 수집하고,
-# 이후 검사부터는 달력/날짜/시간 버튼을 전혀 누르지 않습니다.
+# Convex 공개 API. 첫 정상 DOM 수집 때 코트명↔facilityId를 함께 저장하고,
+# 다음 검사부터 API를 우선 사용합니다. API가 실패하면 기존 DOM 방식으로 자동 복귀합니다.
 MONTH_QUERY = "slots/queries:getMonthSlotCountsPublic"
 SLOT_QUERY = "slots/queries:listByFacilityAndDatePublic"
 TENANT_SLUG = "songdo-tennis"
@@ -37,18 +36,43 @@ FACILITY_MAP_FILE = DATA_DIR / "facility_map.json"
 
 
 def _month_keys(start: date, count: int = 2) -> list[str]:
-    keys: list[str] = []
+    result: list[str] = []
     year, month = start.year, start.month
     for _ in range(count):
-        keys.append(f"{year:04d}-{month:02d}")
+        result.append(f"{year:04d}-{month:02d}")
         month += 1
         if month == 13:
             year += 1
             month = 1
-    return keys
+    return result
 
 
-def _wait_for_convex(page: Any, timeout_ms: int = 15000) -> None:
+def _load_facility_map() -> dict[int, str]:
+    if not FACILITY_MAP_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(FACILITY_MAP_FILE.read_text(encoding="utf-8"))
+        found: dict[int, str] = {}
+        for key, value in raw.items():
+            number = int(key)
+            facility_id = str(value).strip()
+            if number in TARGET_COURTS and facility_id.startswith("m"):
+                found[number] = facility_id
+        return found
+    except Exception as exc:
+        _log(f"facility_map.json 읽기 실패 — DOM 방식으로 다시 수집: {type(exc).__name__}: {exc}")
+        return {}
+
+
+def _save_facility_map(facilities: dict[int, str]) -> None:
+    FACILITY_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {str(k): v for k, v in sorted(facilities.items()) if k in TARGET_COURTS and v}
+    temp = FACILITY_MAP_FILE.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(FACILITY_MAP_FILE)
+
+
+def _wait_for_convex(page: Any, timeout_ms: int = 15000) -> bool:
     script = """() => {
       try {
         const root = document.querySelector('#__nuxt');
@@ -58,8 +82,7 @@ def _wait_for_convex(page: Any, timeout_ms: int = 15000) -> None:
         return !!(plugin && plugin.clientRef && plugin.clientRef.value && plugin.clientRef.value.query);
       } catch (_) { return false; }
     }"""
-    if not _poll(page, lambda: bool(page.evaluate(script)), timeout_ms, step_ms=250):
-        raise RuntimeError("브라우저 내부 Convex client를 찾지 못했습니다.")
+    return _poll(page, lambda: bool(page.evaluate(script)), timeout_ms, step_ms=250)
 
 
 def _convex_query(page: Any, query_name: str, args: dict[str, Any]) -> Any:
@@ -70,38 +93,11 @@ def _convex_query(page: Any, query_name: str, args: dict[str, Any]) -> Any:
           const provided = app && app._context && app._context.provides;
           const plugin = provided && provided['convex-vue'];
           const client = plugin && plugin.clientRef && plugin.clientRef.value;
-          if (!client || typeof client.query !== 'function') {
-            throw new Error('Convex client unavailable');
-          }
+          if (!client || typeof client.query !== 'function') throw new Error('Convex client unavailable');
           return await client.query(queryName, args);
         }""",
         {"queryName": query_name, "args": args},
     )
-
-
-def _load_facility_map() -> dict[int, str]:
-    if not FACILITY_MAP_FILE.exists():
-        return {}
-    try:
-        raw = json.loads(FACILITY_MAP_FILE.read_text(encoding="utf-8"))
-        result: dict[int, str] = {}
-        for key, value in raw.items():
-            number = int(key)
-            facility_id = str(value).strip()
-            if number in TARGET_COURTS and facility_id:
-                result[number] = facility_id
-        return result
-    except Exception as exc:
-        _log(f"facility_map.json 읽기 실패 — 다시 수집합니다: {type(exc).__name__}: {exc}")
-        return {}
-
-
-def _save_facility_map(facilities: dict[int, str]) -> None:
-    FACILITY_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    payload = {str(number): facility_id for number, facility_id in sorted(facilities.items())}
-    temp = FACILITY_MAP_FILE.with_suffix(".json.tmp")
-    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(FACILITY_MAP_FILE)
 
 
 def _install_facility_probe(page: Any) -> None:
@@ -120,10 +116,7 @@ def _install_facility_probe(page: Any) -> None:
             try {
               const payload = args[1];
               if (payload && typeof payload.facilityId === 'string') {
-                window.__chaenissFacilityCalls.push({
-                  facilityId: payload.facilityId,
-                  at: Date.now()
-                });
+                window.__chaenissFacilityCalls.push({facilityId: payload.facilityId, at: Date.now()});
               }
             } catch (_) {}
             return await original(...args);
@@ -133,71 +126,35 @@ def _install_facility_probe(page: Any) -> None:
     )
 
 
-def _latest_probed_facility_id(page: Any) -> str:
-    value = page.evaluate(
-        """() => {
-          const rows = window.__chaenissFacilityCalls || [];
-          return rows.length ? rows[rows.length - 1].facilityId : '';
-        }"""
-    )
-    return str(value or "").strip()
-
-
 def _clear_facility_probe(page: Any) -> None:
-    page.evaluate("() => { window.__chaenissFacilityCalls = []; }")
-
-
-def _collect_facility_map_once(
-    page: Any, debug_dir: Path, existing: dict[int, str] | None = None
-) -> dict[int, str]:
-    facilities = dict(existing or {})
-    missing = [number for number in TARGET_COURTS if number not in facilities]
-    if not missing:
-        return facilities
-
-    _ensure_list(page)
-    _wait_for_convex(page)
-    _install_facility_probe(page)
-    _log(f"facilityId 최초 수집 시작 — 코트 카드 {len(missing)}개만 1회 확인")
-
-    for court_num in missing:
-        try:
-            _ensure_list(page)
-            _clear_facility_probe(page)
-            _open_court(page, court_num, debug_dir)
-            facility_id = ""
-            if _poll(page, lambda: bool(_latest_probed_facility_id(page)), 5000, step_ms=150):
-                facility_id = _latest_probed_facility_id(page)
-            if not facility_id:
-                raise RuntimeError("클릭 후 facilityId 호출을 잡지 못했습니다.")
-            facilities[court_num] = facility_id
-            _save_facility_map(facilities)
-            _log(f"facilityId 저장: {court_num}번={facility_id}")
-        except Exception as exc:
-            _log(f"facilityId 수집 실패 {court_num}번: {type(exc).__name__}: {exc}")
-            _save_debug(page, debug_dir, f"facility_probe_{court_num}_error")
-        finally:
-            try:
-                _return_to_list(page)
-            except Exception:
-                try:
-                    _goto_songdo(page)
-                    _ensure_list(page)
-                except Exception:
-                    pass
-
-    _save_facility_map(facilities)
-    return facilities
-
-
-def _slot_from_api(court_num: int, raw: dict[str, Any]) -> dict[str, Any] | None:
     try:
-        date_raw = str(raw["date"])
+        page.evaluate("() => { window.__chaenissFacilityCalls = []; }")
+    except Exception:
+        pass
+
+
+def _latest_probed_facility_id(page: Any) -> str:
+    try:
+        value = page.evaluate(
+            """() => {
+              const rows = window.__chaenissFacilityCalls || [];
+              return rows.length ? rows[rows.length - 1].facilityId : '';
+            }"""
+        )
+        return str(value or "").strip()
+    except Exception:
+        return ""
+
+
+def _slot_from_api(court_num: int, date_raw: str, raw: dict[str, Any]) -> dict[str, Any] | None:
+    try:
         start = int(raw["startMinute"])
         end = int(raw["endMinute"])
     except (KeyError, TypeError, ValueError):
         return None
     if end <= start:
+        return None
+    if bool(raw.get("isBooked")) or bool(raw.get("cartHeldByAnyone")) or bool(raw.get("isPast")):
         return None
     date_obj = datetime.strptime(date_raw, "%Y-%m-%d").date()
     sh, sm = divmod(start, 60)
@@ -216,54 +173,47 @@ def _slot_from_api(court_num: int, raw: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
-def _collect_with_convex_api(
-    page: Any, facilities: dict[int, str]
-) -> tuple[list[dict[str, Any]], list[str]]:
+def _collect_with_convex_api(page: Any, facilities: dict[int, str]) -> tuple[list[dict[str, Any]], list[str]]:
     slots: list[dict[str, Any]] = []
     errors: list[str] = []
     today = datetime.now(KST).date()
-    dates: set[str] = set()
+    candidate_dates: set[str] = set()
 
+    # 월별 전체 후보 날짜를 먼저 좁힙니다.
     for month in _month_keys(today, 2):
         try:
-            counts = _convex_query(
-                page, MONTH_QUERY, {"month": month, "tenantSlug": TENANT_SLUG}
-            )
+            counts = _convex_query(page, MONTH_QUERY, {"month": month, "tenantSlug": TENANT_SLUG})
             for date_raw, count in (counts or {}).items():
-                if str(date_raw) < today.isoformat():
+                date_text = str(date_raw)
+                if date_text < today.isoformat():
                     continue
                 if isinstance(count, dict) and int(count.get("available", 0) or 0) > 0:
-                    dates.add(str(date_raw))
+                    candidate_dates.add(date_text)
         except Exception as exc:
             errors.append(f"달빛공원 {month} 월별 API: {type(exc).__name__} - {exc}")
 
-    _log(f"API 조회: 코트 {len(facilities)}개 × 후보 날짜 {len(dates)}개")
+    if not candidate_dates:
+        _log("API 월별 조회 결과 후보 날짜 0개")
+        return [], errors
+
+    _log(f"API 조회: 코트 {len(facilities)}개 × 후보 날짜 {len(candidate_dates)}개")
     for court_num, facility_id in sorted(facilities.items()):
-        for date_raw in sorted(dates):
+        for date_raw in sorted(candidate_dates):
             try:
-                raw_slots = _convex_query(
+                rows = _convex_query(
                     page,
                     SLOT_QUERY,
-                    {
-                        "date": date_raw,
-                        "facilityId": facility_id,
-                        "tenantSlug": TENANT_SLUG,
-                    },
+                    {"date": date_raw, "facilityId": facility_id, "tenantSlug": TENANT_SLUG},
                 )
-                for raw in raw_slots or []:
-                    if bool(raw.get("isBooked")):
+                for raw in rows or []:
+                    if not isinstance(raw, dict):
                         continue
-                    if bool(raw.get("cartHeldByAnyone")):
-                        continue
-                    if bool(raw.get("isPast")):
-                        continue
-                    slot = _slot_from_api(court_num, raw)
-                    if slot:
+                    slot = _slot_from_api(court_num, date_raw, raw)
+                    if slot is not None:
                         slots.append(slot)
             except Exception as exc:
-                errors.append(
-                    f"달빛공원 {court_num}번 {date_raw} API: {type(exc).__name__} - {exc}"
-                )
+                errors.append(f"달빛공원 {court_num}번 {date_raw} API: {type(exc).__name__} - {exc}")
+
     return slots, errors
 
 
@@ -1174,7 +1124,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.3 API-ONLY 시작 — 최초 1회 시설 ID 저장 후 클릭 없이 조회")
+        _log("v6.4 HYBRID 시작 — 저장된 ID는 API, 최초/실패 시 기존 DOM 자동 복귀")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
@@ -1186,23 +1136,81 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
             page.set_default_timeout(REQUEST_TIMEOUT * 1000)
 
             _goto_songdo(page)
-            _wait_for_convex(page)
-
             facilities = _load_facility_map()
-            if len(facilities) < len(TARGET_COURTS):
-                facilities = _collect_facility_map_once(page, debug_dir, facilities)
-            else:
+            api_used = False
+
+            # facility_map이 완성된 경우 코트/달력 클릭 없이 바로 API 조회합니다.
+            if len(facilities) == len(TARGET_COURTS) and _wait_for_convex(page):
                 _log(f"저장된 facility_map.json 사용 — {len(facilities)}개 코트")
+                try:
+                    api_slots, api_errors = _collect_with_convex_api(page, facilities)
+                    # API 호출 자체가 전부 실패한 경우에는 기존 DOM 방식으로 안전하게 복귀합니다.
+                    fatal_api = bool(api_errors) and not api_slots and len(api_errors) >= 2
+                    if not fatal_api:
+                        slots.extend(api_slots)
+                        errors.extend(api_errors)
+                        api_used = True
+                        _log(f"API 조회 완료 — 가능 슬롯 {len(api_slots)}개")
+                    else:
+                        _log("API 조회가 정상 완료되지 않아 기존 DOM 방식으로 자동 복귀")
+                except Exception as exc:
+                    _log(f"API 조회 예외 — 기존 DOM 방식으로 자동 복귀: {type(exc).__name__}: {exc}")
 
-            missing = [number for number in TARGET_COURTS if number not in facilities]
-            if missing:
-                _log(f"아직 facilityId가 없는 코트: {missing} — 다음 검사에서 다시 수집")
-            if not facilities:
-                raise RuntimeError("수집된 facilityId가 하나도 없습니다.")
+            if not api_used:
+                # 이 부분은 잘 동작하던 v6.1.17의 진입·코트·달력 순회 로직을 그대로 사용합니다.
+                _ensure_list(page)
+                _log("코트 목록 확인 완료 — 기존 안정형 DOM 수집 시작")
 
-            api_slots, api_errors = _collect_with_convex_api(page, facilities)
-            slots.extend(api_slots)
-            errors.extend(api_errors)
+                probe_ready = False
+                if _wait_for_convex(page, timeout_ms=5000):
+                    try:
+                        _install_facility_probe(page)
+                        probe_ready = True
+                        _log("facilityId 수집 후크 설치 완료")
+                    except Exception as exc:
+                        _log(f"facilityId 후크 설치 실패(예약 수집은 계속): {type(exc).__name__}: {exc}")
+
+                for court_num in TARGET_COURTS:
+                    try:
+                        _ensure_list(page)
+                        if probe_ready:
+                            _clear_facility_probe(page)
+                        _log(f"{court_num}번: 상세 화면 진입 시도")
+                        _open_court(page, court_num, debug_dir)
+
+                        # 정상 상세 진입 시 브라우저가 실제 사용한 facilityId를 저장합니다.
+                        if probe_ready:
+                            facility_id = ""
+                            if _poll(page, lambda: bool(_latest_probed_facility_id(page)), 4000, step_ms=150):
+                                facility_id = _latest_probed_facility_id(page)
+                            if facility_id:
+                                facilities[court_num] = facility_id
+                                _save_facility_map(facilities)
+                                _log(f"facilityId 저장: {court_num}번={facility_id}")
+                            else:
+                                _log(f"facilityId 미확인: {court_num}번 — 다음 검사에서 재시도")
+
+                        _collect_court_dates_and_times(page, court_num, slots, errors)
+                        _return_to_list(page)
+                        _ensure_list(page)
+                    except Exception as exc:
+                        errors.append(f"달빛공원 {court_num}번: {type(exc).__name__} - {exc}")
+                        _save_debug(page, debug_dir, f"dalbit_error_court_{court_num}")
+                        try:
+                            _ensure_list(page, timeout_ms=10000)
+                        except Exception:
+                            try:
+                                _goto_songdo(page)
+                            except Exception:
+                                pass
+
+                if facilities:
+                    _save_facility_map(facilities)
+                    missing = [n for n in TARGET_COURTS if n not in facilities]
+                    if missing:
+                        _log(f"facility_map 저장 {len(facilities)}개 / 미확인 {missing}")
+                    else:
+                        _log("facility_map 13개 코트 완성 — 다음 검사부터 API 우선 사용")
 
             try:
                 context.storage_state(path=str(debug_dir / "songdo_storage_state.json"))
@@ -1217,3 +1225,4 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     result = sorted(unique.values(), key=lambda s: (s["date_raw"], s["start_hour"], s["court_code"]))
     _log(f"수집 종료: 가능 슬롯 {len(result)}개, 오류 {len(errors)}개")
     return result, errors
+

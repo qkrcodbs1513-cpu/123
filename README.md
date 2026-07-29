@@ -50,7 +50,10 @@
 
 Trigger Railway redeploy
 
-## v6.3 달빛공원 API 전용 방식
-첫 실행 시 달빛공원 5~17번 코트의 카드만 한 번씩 확인하여 `facility_map.json`을 만듭니다. 이 과정이 끝난 뒤부터는 코트·달력·날짜를 순회하지 않고 Convex API로만 빈자리를 확인합니다.
+## v6.4 Hybrid API 개선
 
-Railway Volume을 사용하는 경우 `DATA_DIR`을 Volume 경로로 지정하면 재배포 후에도 `facility_map.json`이 유지됩니다. 파일이 없거나 일부 코트가 누락되면 누락된 코트만 자동으로 다시 수집합니다.
+- 잘 동작하던 v6.1.17의 예약 화면 진입 및 DOM 수집 로직을 그대로 유지합니다.
+- 최초 정상 수집 때 5~17번 코트의 facilityId를 `facility_map.json`에 자동 저장합니다.
+- facilityId 13개가 모두 저장된 다음 검사부터 Convex 공개 API를 우선 사용합니다.
+- API가 실패하면 자동으로 기존 DOM 수집 방식으로 복귀합니다.
+- 기존 텔레그램 알림, 중복 방지, 연수문화공원 수집 로직은 변경하지 않았습니다.
