@@ -90,6 +90,7 @@ def _extract_slots(
         weekday_num = slot_date.weekday()
         slots.append(
             {
+                "site": "yeonsu",
                 "court_code": court_code,
                 "court": court_name,
                 "date_raw": date_value,
@@ -105,16 +106,32 @@ def _extract_slots(
 
 
 def slot_key(slot: dict[str, Any]) -> str:
-    return f"{slot['court_code']}|{slot['date_raw']}|{slot['time_raw']}"
+    return f"{slot.get('site', 'yeonsu')}|{slot['court_code']}|{slot['date_raw']}|{slot['time_raw']}"
 
 
 def matches_settings(slot: dict[str, Any], settings: dict[str, Any]) -> bool:
-    if slot["court_code"] not in settings["courts"]:
+    site = slot.get("site", "yeonsu")
+    if site == "yeonsu" and slot["court_code"] not in settings["courts"]:
         return False
+    if site == "songdo":
+        try:
+            court_num = int(str(slot.get("court_code", "S00")).lstrip("S"))
+        except ValueError:
+            return False
+        if court_num not in settings.get("songdo_courts", list(range(5, 15))):
+            return False
+        surface = "hard" if 5 <= court_num <= 8 else "artificial"
+        if surface not in settings.get("songdo_surfaces", ["hard", "artificial"]):
+            return False
 
     weekday_num = int(slot["weekday_num"])
     start_hour = int(slot["start_hour"])
-    hours = settings["weekend_hours"] if weekday_num >= 5 else settings["weekday_hours"]
+    prefix = "songdo" if site == "songdo" else "yeonsu"
+    day_type = "weekend" if weekday_num >= 5 else "weekday"
+    hours = settings.get(f"{prefix}_{day_type}_hours")
+    # 이전 설정 파일과의 호환
+    if f"{prefix}_{day_type}_hours" not in settings:
+        hours = settings.get(f"{day_type}_hours")
     return hours is None or start_hour in hours
 
 
