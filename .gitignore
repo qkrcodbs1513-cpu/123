@@ -1,7 +1,6 @@
 __pycache__/
 *.pyc
-.env
+chaeniss_v8.json*
+settings.json
 bot_state.json
-current_slots.json
-seen.json
-config.json
+playwright-report/
