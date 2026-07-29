@@ -53,10 +53,17 @@ Trigger Railway redeploy
 ## v6.4 Hybrid API 개선
 
 - 잘 동작하던 v6.1.17의 예약 화면 진입 및 DOM 수집 로직을 그대로 유지합니다.
-- 최초 정상 수집 때 5~17번 코트의 facilityId를 `facility_map.json`에 자동 저장합니다.
-- facilityId 13개가 모두 저장된 다음 검사부터 Convex 공개 API를 우선 사용합니다.
+- 최초 정상 수집 때 5~14번 코트의 facilityId를 `facility_map.json`에 자동 저장합니다.
+- facilityId 10개가 모두 저장된 다음 검사부터 Convex 공개 API를 우선 사용합니다.
 - API가 실패하면 자동으로 기존 DOM 수집 방식으로 복귀합니다.
 - 기존 텔레그램 알림, 중복 방지, 연수문화공원 수집 로직은 변경하지 않았습니다.
 
 ## v6.5 FAST RECOVERY
-`facility_map.json`이 없으면 5~17번 코트 상세를 한 번씩만 열어 Convex WebSocket에서 시설 ID를 수집합니다. 완료 즉시 API 조회로 전환하며, 실패하면 기존 DOM 방식으로 자동 복구합니다.
+`facility_map.json`이 없으면 5~14번 코트 상세를 한 번씩만 열어 Convex WebSocket에서 시설 ID를 수집합니다. 완료 즉시 API 조회로 전환하며, 실패하면 기존 DOM 방식으로 자동 복구합니다.
+
+
+## v6.6 FAST ALERT
+- 달빛공원은 5~14번 코트만 감시합니다.
+- 5~8번은 하드코트, 9~14번은 인조잔디로 알림에 표시합니다.
+- 저장된 일부 facilityId도 바로 API 조회하며, 누락 코트는 ID 수집 직후 즉시 빈자리를 조회합니다.
+- 전체 코트를 다시 훑지 않고 아직 확인하지 못한 코트만 DOM으로 보완합니다.
