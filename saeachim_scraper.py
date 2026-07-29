@@ -10,6 +10,7 @@ KST = timezone(timedelta(hours=9))
 WEEKDAYS_KO = ["월", "화", "수", "목", "금", "토", "일"]
 TIME_RE = re.compile(r"(?P<sh>\d{1,2}):(?P<sm>\d{2})\s*[~\-–—]\s*(?P<eh>\d{1,2}):(?P<em>\d{2})")
 TARGET_COURTS = (1, 2, 3, 4)
+CANONICAL_SAEACHIM_URL = "https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07"
 
 
 def _log(message: str) -> None:
@@ -37,7 +38,7 @@ def _make_slot(court_num: int, date_raw: str, text: str) -> dict[str, Any] | Non
         "time": f"{sh:02d}:{sm:02d}~{eh:02d}:{em:02d}",
         "start_hour": sh,
         "weekday_num": date_obj.weekday(),
-        "url": SAEACHIM_URL,
+        "url": CANONICAL_SAEACHIM_URL,
     }
 
 
@@ -157,6 +158,30 @@ def _click_next_month(page: Any) -> bool:
         return False
 
 
+
+def _open_schedule_page(page: Any) -> None:
+    """새아침 대관 달력으로 직접 진입합니다.
+
+    Railway에 예전 SAEACHIM_URL 값(reserve 메인 주소)이 남아 있어도
+    실제 대관 페이지인 res.insiseol.or.kr 주소를 우선 사용합니다.
+    """
+    configured = (SAEACHIM_URL or "").strip()
+    target = configured if "res.insiseol.or.kr/rent/rentalSchedule" in configured else CANONICAL_SAEACHIM_URL
+
+    response = page.goto(target, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
+    status = response.status if response else "no-response"
+    _log(f"대관 페이지 접속 — HTTP {status} / {page.url}")
+
+    # 통합예약 메인으로 튕긴 경우 실제 대관 도메인으로 한 번 더 강제 진입합니다.
+    if "res.insiseol.or.kr/rent/rentalSchedule" not in page.url:
+        response = page.goto(CANONICAL_SAEACHIM_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
+        status = response.status if response else "no-response"
+        _log(f"대관 페이지 재접속 — HTTP {status} / {page.url}")
+
+    page.wait_for_selector("#main_rent_idx", state="attached", timeout=REQUEST_TIMEOUT * 1000)
+    page.wait_for_selector("#sf_idx", state="attached", timeout=REQUEST_TIMEOUT * 1000)
+
+
 def get_saeachim_slots_with_status(
     enabled_courts: list[int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -177,11 +202,9 @@ def get_saeachim_slots_with_status(
             page.set_default_timeout(REQUEST_TIMEOUT * 1000)
             for court_num in courts:
                 try:
-                    # 코트마다 새로 접속하여 항상 현재 월부터 확인합니다.
-                    response = page.goto(SAEACHIM_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
-                    status = response.status if response else "no-response"
-                    _log(f"{court_num}코트 페이지 접속 — HTTP {status} / {page.url}")
-                    page.wait_for_selector("#main_rent_idx", state="attached", timeout=REQUEST_TIMEOUT * 1000)
+                    # 코트마다 실제 대관 페이지로 새로 진입해 현재 월부터 확인합니다.
+                    _open_schedule_page(page)
+                    _log(f"{court_num}코트 선택 시작")
                     main_select = page.locator("#main_rent_idx")
                     if not _select_option_containing(main_select, "새아침"):
                         raise RuntimeError("새아침(테니스장) 시설 옵션을 찾지 못했습니다.")
