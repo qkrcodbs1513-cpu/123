@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,6 +26,173 @@ TIME_RE = re.compile(
 )
 AVAIL_RE = re.compile(r"(?P<available>\d+)\s*/\s*(?P<total>\d+)\s*예약\s*가능")
 TARGET_COURTS = tuple(range(5, 15))
+
+
+# Convex 공개 API. 브라우저는 사이트 앱과 Convex 클라이언트를 로드하는 역할만 하며,
+# 날짜/코트 클릭 대신 아래 쿼리로 예약 데이터를 직접 읽습니다.
+MONTH_QUERY = "slots/queries:getMonthSlotCountsPublic"
+SLOT_QUERY = "slots/queries:listByFacilityAndDatePublic"
+TENANT_SLUG = "songdo-tennis"
+KNOWN_FACILITIES: dict[int, str] = {
+    5: "m9787fez1x2bp21pqr0x8dvx317x9qf9",
+}
+
+
+def _month_keys(start: date, count: int = 2) -> list[str]:
+    keys: list[str] = []
+    year, month = start.year, start.month
+    for _ in range(count):
+        keys.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month == 13:
+            year += 1
+            month = 1
+    return keys
+
+
+def _wait_for_convex(page: Any, timeout_ms: int = 15000) -> None:
+    script = """() => {
+      try {
+        const root = document.querySelector('#__nuxt');
+        const app = root && root.__vue_app__;
+        const provided = app && app._context && app._context.provides;
+        const plugin = provided && provided['convex-vue'];
+        return !!(plugin && plugin.clientRef && plugin.clientRef.value && plugin.clientRef.value.query);
+      } catch (_) { return false; }
+    }"""
+    if not _poll(page, lambda: bool(page.evaluate(script)), timeout_ms, step_ms=250):
+        raise RuntimeError("브라우저 내부 Convex client를 찾지 못했습니다.")
+
+
+def _convex_query(page: Any, query_name: str, args: dict[str, Any]) -> Any:
+    return page.evaluate(
+        """async ({queryName, args}) => {
+          const root = document.querySelector('#__nuxt');
+          const app = root && root.__vue_app__;
+          const provided = app && app._context && app._context.provides;
+          const plugin = provided && provided['convex-vue'];
+          const client = plugin && plugin.clientRef && plugin.clientRef.value;
+          if (!client || typeof client.query !== 'function') {
+            throw new Error('Convex client unavailable');
+          }
+          return await client.query(queryName, args);
+        }""",
+        {"queryName": query_name, "args": args},
+    )
+
+
+def _discover_facilities_from_cache(page: Any) -> dict[int, str]:
+    """Convex 원격 쿼리 캐시를 재귀 순회해 'n번 코트'와 facilityId를 찾습니다."""
+    rows = page.evaluate(
+        """() => {
+          const root = document.querySelector('#__nuxt');
+          const app = root && root.__vue_app__;
+          const provided = app && app._context && app._context.provides;
+          const plugin = provided && provided['convex-vue'];
+          const client = plugin && plugin.clientRef && plugin.clientRef.value;
+          const inner = client && (client._client || client.client);
+          const map = inner && inner.remoteQuerySet && inner.remoteQuerySet.remoteQuerySet;
+          if (!(map instanceof Map)) return [];
+
+          const found = new Map();
+          const seen = new Set();
+          function walk(v, depth) {
+            if (v == null || depth > 8) return;
+            if ((typeof v === 'object' || typeof v === 'function') && seen.has(v)) return;
+            if (typeof v === 'object' || typeof v === 'function') seen.add(v);
+            if (Array.isArray(v)) { v.forEach(x => walk(x, depth + 1)); return; }
+            if (v instanceof Map) { for (const [k, x] of v) { walk(k, depth+1); walk(x, depth+1); } return; }
+            if (typeof v !== 'object') return;
+
+            const id = typeof v.facilityId === 'string' ? v.facilityId
+                     : (typeof v._id === 'string' && /facility/i.test(String(v.type || v.kind || '')) ? v._id : null);
+            const name = [v.facilityName, v.name, v.title].find(x => typeof x === 'string' && /\d+번\s*코트/.test(x));
+            if (id && name) found.set(id, name);
+            for (const key of Reflect.ownKeys(v)) {
+              try { walk(v[key], depth + 1); } catch (_) {}
+            }
+          }
+          for (const q of map.values()) walk(q, 0);
+          return [...found.entries()].map(([facilityId, facilityName]) => ({facilityId, facilityName}));
+        }"""
+    )
+    result: dict[int, str] = dict(KNOWN_FACILITIES)
+    for row in rows or []:
+        name = str(row.get("facilityName", ""))
+        match = re.search(r"(\d+)번\s*코트", name)
+        facility_id = str(row.get("facilityId", ""))
+        if match and facility_id:
+            number = int(match.group(1))
+            if number in TARGET_COURTS:
+                result[number] = facility_id
+    return result
+
+
+def _slot_from_api(court_num: int, raw: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        date_raw = str(raw["date"])
+        start = int(raw["startMinute"])
+        end = int(raw["endMinute"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if end <= start:
+        return None
+    date_obj = datetime.strptime(date_raw, "%Y-%m-%d").date()
+    sh, sm = divmod(start, 60)
+    eh, em = divmod(end, 60)
+    return {
+        "site": "songdo",
+        "court_code": f"S{court_num:02d}",
+        "court": f"달빛공원 {court_num}번 코트",
+        "date_raw": date_raw,
+        "date": f"{date_raw} ({WEEKDAYS_KO[date_obj.weekday()]})",
+        "time_raw": f"{sh:02d}:{sm:02d}",
+        "time": f"{sh:02d}:{sm:02d}~{eh:02d}:{em:02d}",
+        "start_hour": sh,
+        "weekday_num": date_obj.weekday(),
+        "url": SONGDO_URL,
+    }
+
+
+def _collect_with_convex_api(page: Any, facilities: dict[int, str]) -> tuple[list[dict[str, Any]], list[str]]:
+    slots: list[dict[str, Any]] = []
+    errors: list[str] = []
+    today = datetime.now(KST).date()
+    dates: set[str] = set()
+
+    for month in _month_keys(today, 2):
+        try:
+            counts = _convex_query(page, MONTH_QUERY, {"month": month, "tenantSlug": TENANT_SLUG})
+            for date_raw, count in (counts or {}).items():
+                if str(date_raw) < today.isoformat():
+                    continue
+                if isinstance(count, dict) and int(count.get("available", 0) or 0) > 0:
+                    dates.add(str(date_raw))
+        except Exception as exc:
+            errors.append(f"달빛공원 {month} 월별 API: {type(exc).__name__} - {exc}")
+
+    _log(f"Convex API 대상: 코트 {len(facilities)}개, 예약 가능 표시 날짜 {len(dates)}개")
+    for court_num, facility_id in sorted(facilities.items()):
+        for date_raw in sorted(dates):
+            try:
+                raw_slots = _convex_query(page, SLOT_QUERY, {
+                    "date": date_raw,
+                    "facilityId": facility_id,
+                    "tenantSlug": TENANT_SLUG,
+                })
+                for raw in raw_slots or []:
+                    if bool(raw.get("isBooked")):
+                        continue
+                    if bool(raw.get("cartHeldByAnyone")):
+                        continue
+                    if bool(raw.get("isPast")):
+                        continue
+                    slot = _slot_from_api(court_num, raw)
+                    if slot:
+                        slots.append(slot)
+            except Exception as exc:
+                errors.append(f"달빛공원 {court_num}번 {date_raw} API: {type(exc).__name__} - {exc}")
+    return slots, errors
 
 
 def _log(message: str) -> None:
@@ -935,7 +1102,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _log("v6.1.18 API-PROBE 시작 — 달력 오른쪽 화살표로 다음 달 순회")
+        _log("v6.2 CONVEX-API 시작 — 달력/날짜 클릭 없는 API 우선 수집")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             context_args: dict[str, Any] = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
@@ -945,31 +1112,35 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
             context = browser.new_context(**context_args)
             page = context.new_page()
             page.set_default_timeout(REQUEST_TIMEOUT * 1000)
-            _, summarize_api_probe = _install_api_probe(page, debug_dir)
 
             _goto_songdo(page)
-            _ensure_list(page)
-            _log("코트 목록 확인 완료")
+            _wait_for_convex(page)
 
-            for court_num in TARGET_COURTS:
-                try:
-                    _ensure_list(page)
-                    _log(f"{court_num}번: 상세 화면 진입 시도")
-                    _open_court(page, court_num, debug_dir)
+            # 목록 화면을 한 번 렌더링해 시설 쿼리 결과가 Convex 캐시에 들어오게 합니다.
+            try:
+                _ensure_list(page)
+            except Exception as exc:
+                _log(f"코트 목록 렌더링 실패(공개 API는 계속 시도): {type(exc).__name__}: {exc}")
 
-                    # 연수문화공원처럼 현재 보이는 날짜만 보지 않고,
-                    # 다음 날짜 묶음까지 넘기며 평일·주말 전체를 수집합니다.
-                    _collect_court_dates_and_times(page, court_num, slots, errors)
+            facilities = _discover_facilities_from_cache(page)
+            _log("발견 facilityId: " + ", ".join(f"{n}번={fid}" for n, fid in sorted(facilities.items())))
 
-                    # 다음 코트를 위해 모달을 닫고 목록으로 복귀합니다.
-                    _return_to_list(page)
-                    _ensure_list(page)
-                except Exception as exc:
-                    errors.append(f"달빛공원 {court_num}번: {type(exc).__name__} - {exc}")
-                    _save_debug(page, debug_dir, f"dalbit_error_court_{court_num}")
+            api_slots, api_errors = _collect_with_convex_api(page, facilities)
+            slots.extend(api_slots)
+            errors.extend(api_errors)
+
+            missing_courts = [n for n in TARGET_COURTS if n not in facilities]
+            if missing_courts:
+                _log(f"facilityId 미발견 코트 {missing_courts} — 기존 DOM 방식으로만 보완")
+                for court_num in missing_courts:
                     try:
-                        _ensure_list(page, timeout_ms=10000)
-                    except Exception:
+                        _ensure_list(page)
+                        _open_court(page, court_num, debug_dir)
+                        _collect_court_dates_and_times(page, court_num, slots, errors)
+                        _return_to_list(page)
+                    except Exception as exc:
+                        errors.append(f"달빛공원 {court_num}번 보완: {type(exc).__name__} - {exc}")
+                        _save_debug(page, debug_dir, f"dalbit_error_court_{court_num}")
                         try:
                             _goto_songdo(page)
                         except Exception:
@@ -980,7 +1151,6 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
             except Exception:
                 pass
             _save_debug(page, debug_dir, "songdo_last")
-            summarize_api_probe()
             browser.close()
     except Exception as exc:
         errors.append(f"달빛공원: {type(exc).__name__} - {exc}")
@@ -989,3 +1159,4 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
     result = sorted(unique.values(), key=lambda s: (s["date_raw"], s["start_hour"], s["court_code"]))
     _log(f"수집 종료: 가능 슬롯 {len(result)}개, 오류 {len(errors)}개")
     return result, errors
+
