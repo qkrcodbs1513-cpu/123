@@ -92,17 +92,41 @@ def _wait_for_convex(page: Any, timeout_ms: int = 15000) -> bool:
 
 
 def _convex_query(page: Any, query_name: str, args: dict[str, Any]) -> Any:
+    """Convex 공개 쿼리를 실행하되 응답이 없으면 강제로 종료합니다.
+
+    ``page.evaluate`` 안에서 기다리는 JavaScript Promise에는 Playwright의
+    ``set_default_timeout``이 적용되지 않을 수 있습니다. Convex WebSocket이
+    연결만 된 채 응답하지 않으면 전체 감시 루프가 영구 정지하므로
+    Promise.race로 쿼리 자체에 제한 시간을 둡니다.
+    """
+    timeout_ms = max(5_000, int(REQUEST_TIMEOUT * 1000))
     return page.evaluate(
-        """async ({queryName, args}) => {
+        """async ({queryName, args, timeoutMs}) => {
           const root = document.querySelector('#__nuxt');
           const app = root && root.__vue_app__;
           const provided = app && app._context && app._context.provides;
           const plugin = provided && provided['convex-vue'];
           const client = plugin && plugin.clientRef && plugin.clientRef.value;
-          if (!client || typeof client.query !== 'function') throw new Error('Convex client unavailable');
-          return await client.query(queryName, args);
+          if (!client || typeof client.query !== 'function') {
+            throw new Error('Convex client unavailable');
+          }
+
+          let timer;
+          try {
+            return await Promise.race([
+              client.query(queryName, args),
+              new Promise((_, reject) => {
+                timer = setTimeout(
+                  () => reject(new Error(`Convex query timeout after ${timeoutMs}ms: ${queryName}`)),
+                  timeoutMs
+                );
+              }),
+            ]);
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
         }""",
-        {"queryName": query_name, "args": args},
+        {"queryName": query_name, "args": args, "timeoutMs": timeout_ms},
     )
 
 
@@ -227,7 +251,9 @@ def _collect_with_convex_api(page: Any, facilities: dict[int, str]) -> tuple[lis
     candidate_dates: set[str] = set()
 
     # 월별 전체 후보 날짜를 먼저 좁힙니다.
-    for month in _month_keys(today, 2):
+    months = _month_keys(today, 2)
+    _log(f"월별 API 조회 시작 — {', '.join(months)}")
+    for month in months:
         try:
             counts = _convex_query(page, MONTH_QUERY, {"month": month, "tenantSlug": TENANT_SLUG})
             for date_raw, count in (counts or {}).items():
@@ -267,7 +293,7 @@ def _collect_with_convex_api(page: Any, facilities: dict[int, str]) -> tuple[lis
 def _log(message: str) -> None:
     debug = os.getenv("DALBIT_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
     important = (
-        "저장된 facility_map.json 사용", "API 조회:", "API 조회 완료",
+        "저장된 facility_map.json 사용", "월별 API 조회 시작", "API 조회:", "API 조회 완료",
         "수집 종료:", "facility_map 10개 완성", "API 조회 예외",
         "API 전환 미완료", "달빛공원 API"
     )
