@@ -57,3 +57,6 @@ Trigger Railway redeploy
 - facilityId 13개가 모두 저장된 다음 검사부터 Convex 공개 API를 우선 사용합니다.
 - API가 실패하면 자동으로 기존 DOM 수집 방식으로 복귀합니다.
 - 기존 텔레그램 알림, 중복 방지, 연수문화공원 수집 로직은 변경하지 않았습니다.
+
+## v6.5 FAST RECOVERY
+`facility_map.json`이 없으면 5~17번 코트 상세를 한 번씩만 열어 Convex WebSocket에서 시설 ID를 수집합니다. 완료 즉시 API 조회로 전환하며, 실패하면 기존 DOM 방식으로 자동 복구합니다.
