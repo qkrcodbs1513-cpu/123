@@ -171,8 +171,10 @@ def get_saeachim_slots_with_status(
             for court_num in courts:
                 try:
                     # 코트마다 새로 접속하여 항상 현재 월부터 확인합니다.
-                    page.goto(SAEACHIM_URL, wait_until="domcontentloaded")
-                    page.wait_for_selector("#main_rent_idx", timeout=REQUEST_TIMEOUT * 1000)
+                    response = page.goto(SAEACHIM_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
+                    status = response.status if response else "no-response"
+                    _log(f"{court_num}코트 페이지 접속 — HTTP {status} / {page.url}")
+                    page.wait_for_selector("#main_rent_idx", state="attached", timeout=REQUEST_TIMEOUT * 1000)
                     main_select = page.locator("#main_rent_idx")
                     if not _select_option_containing(main_select, "새아침"):
                         raise RuntimeError("새아침(테니스장) 시설 옵션을 찾지 못했습니다.")
