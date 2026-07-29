@@ -89,3 +89,5 @@ Telegram `/settings`에서 새아침 사용 여부, 코트, 평일/주말 시간
 
 - `SAEACHIM_URL=https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07`
 - `SAEACHIM_ENABLED=true`
+
+
