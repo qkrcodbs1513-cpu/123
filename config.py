@@ -39,3 +39,9 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN 환경변수가 없습니다. Railway Variables에 등록하세요.")
 if not CHAT_ID:
     raise RuntimeError("CHAT_ID 환경변수가 없습니다. Railway Variables에 등록하세요.")
+
+SAEACHIM_URL = os.getenv(
+    "SAEACHIM_URL",
+    "https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07",
+).strip()
+SAEACHIM_ENABLED_DEFAULT = os.getenv("SAEACHIM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}

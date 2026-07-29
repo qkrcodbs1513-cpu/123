@@ -124,9 +124,17 @@ def matches_settings(slot: dict[str, Any], settings: dict[str, Any]) -> bool:
         if surface not in settings.get("songdo_surfaces", ["hard", "artificial"]):
             return False
 
+    if site == "saeachim":
+        try:
+            court_num = int(str(slot.get("court_code", "N0")).lstrip("N"))
+        except ValueError:
+            return False
+        if court_num not in settings.get("saeachim_courts", [1, 2, 3, 4]):
+            return False
+
     weekday_num = int(slot["weekday_num"])
     start_hour = int(slot["start_hour"])
-    prefix = "songdo" if site == "songdo" else "yeonsu"
+    prefix = site if site in {"songdo", "saeachim"} else "yeonsu"
     day_type = "weekend" if weekday_num >= 5 else "weekday"
     hours = settings.get(f"{prefix}_{day_type}_hours")
     # 이전 설정 파일과의 호환

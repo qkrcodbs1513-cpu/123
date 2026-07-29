@@ -14,6 +14,7 @@ from config import (
     SETTINGS_FILE,
     STATE_FILE,
     SONGDO_ENABLED_DEFAULT,
+    SAEACHIM_ENABLED_DEFAULT,
 )
 
 KST = timezone(timedelta(hours=9))
@@ -30,6 +31,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "songdo_enabled": SONGDO_ENABLED_DEFAULT,
     "songdo_courts": list(range(5, 15)),
     "songdo_surfaces": ["hard", "artificial"],
+    "saeachim_enabled": SAEACHIM_ENABLED_DEFAULT,
+    "saeachim_courts": [1, 2, 3, 4],
+    "saeachim_weekday_hours": DEFAULT_WEEKDAY_HOURS,
+    "saeachim_weekend_hours": DEFAULT_WEEKEND_HOURS,
 }
 
 DEFAULT_STATE: dict[str, Any] = {
@@ -78,10 +83,12 @@ def load_settings() -> dict[str, Any]:
     data["courts"] = courts or ["A", "B", "C"]
     data["yeonsu_enabled"] = bool(data.get("yeonsu_enabled", True))
     data["songdo_enabled"] = bool(data.get("songdo_enabled", SONGDO_ENABLED_DEFAULT))
+    data["saeachim_enabled"] = bool(data.get("saeachim_enabled", SAEACHIM_ENABLED_DEFAULT))
+    data["saeachim_courts"] = sorted({int(x) for x in data.get("saeachim_courts", [1, 2, 3, 4]) if 1 <= int(x) <= 4}) or [1, 2, 3, 4]
     data["songdo_courts"] = sorted({int(x) for x in data.get("songdo_courts", range(5, 15)) if 5 <= int(x) <= 14}) or list(range(5, 15))
     allowed_surfaces = {"hard", "artificial"}
     data["songdo_surfaces"] = sorted({str(x) for x in data.get("songdo_surfaces", allowed_surfaces) if str(x) in allowed_surfaces}) or ["hard", "artificial"]
-    if not data["yeonsu_enabled"] and not data["songdo_enabled"]:
+    if not data["yeonsu_enabled"] and not data["songdo_enabled"] and not data["saeachim_enabled"]:
         data["yeonsu_enabled"] = True
 
     # v6.7 이하의 공통 시간 설정을 사이트별 설정으로 자동 이전합니다.
@@ -92,6 +99,8 @@ def load_settings() -> dict[str, Any]:
         ("yeonsu_weekend_hours", legacy_weekend),
         ("songdo_weekday_hours", legacy_weekday),
         ("songdo_weekend_hours", legacy_weekend),
+        ("saeachim_weekday_hours", legacy_weekday),
+        ("saeachim_weekend_hours", legacy_weekend),
     ):
         value = data.get(key, fallback)
         if value is not None:

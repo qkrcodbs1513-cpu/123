@@ -15,6 +15,7 @@ from config import (
 )
 from scraper import get_available_slots_with_status, matches_settings, slot_key
 from songdo_scraper import get_songdo_slots_with_status
+from saeachim_scraper import get_saeachim_slots_with_status
 from storage import load_settings, load_state, save_settings, save_state
 from telegram_bot import (
     answer_callback_query,
@@ -33,6 +34,7 @@ LAST_TOTAL_SLOTS = 0
 LAST_TARGET_COUNT = 0
 LAST_YEONSU_TARGETS = 0
 LAST_SONGDO_TARGETS = 0
+LAST_SAEACHIM_TARGETS = 0
 LAST_NEW_COUNT = 0
 LAST_ERROR = ""
 START_MONOTONIC = time.monotonic()
@@ -73,10 +75,14 @@ def settings_text() -> str:
         songdo_enabled = bool(APP_SETTINGS.get("songdo_enabled", False))
         songdo_courts = APP_SETTINGS.get("songdo_courts", list(range(5, 15)))
         surfaces = set(APP_SETTINGS.get("songdo_surfaces", ["hard", "artificial"]))
+        saeachim_enabled = bool(APP_SETTINGS.get("saeachim_enabled", True))
+        saeachim_courts = APP_SETTINGS.get("saeachim_courts", [1, 2, 3, 4])
     y_weekday, y_weekend = site_hours_text("yeonsu")
     d_weekday, d_weekend = site_hours_text("songdo")
+    n_weekday, n_weekend = site_hours_text("saeachim")
     surface_text = "/".join(x for x, key in (("하드", "hard"), ("인조잔디", "artificial")) if key in surfaces) or "없음"
     court_text = ",".join(map(str, songdo_courts))
+    saeachim_court_text = ",".join(map(str, saeachim_courts))
     return (
         f"🏟️ 연수문화공원: <b>{'켜짐' if yeonsu_enabled else '꺼짐'}</b>\n"
         f"　평일 <b>{escape(y_weekday)}</b> / 주말 <b>{escape(y_weekend)}</b>\n"
@@ -84,6 +90,9 @@ def settings_text() -> str:
         f"🌙 달빛공원: <b>{'켜짐' if songdo_enabled else '꺼짐'}</b>\n"
         f"　평일 <b>{escape(d_weekday)}</b> / 주말 <b>{escape(d_weekend)}</b>\n"
         f"　코트 <b>{escape(court_text)}</b> / 재질 <b>{escape(surface_text)}</b>\n"
+        f"🌅 새아침테니스장: <b>{'켜짐' if saeachim_enabled else '꺼짐'}</b>\n"
+        f"　평일 <b>{escape(n_weekday)}</b> / 주말 <b>{escape(n_weekend)}</b>\n"
+        f"　코트 <b>{escape(saeachim_court_text)}</b>\n"
         f"🔁 검사 주기: <b>{CHECK_INTERVAL}초</b>"
     )
 
@@ -92,6 +101,7 @@ def settings_keyboard() -> dict[str, Any]:
     with STATE_LOCK:
         yeonsu_enabled = bool(APP_SETTINGS.get("yeonsu_enabled", True))
         songdo_enabled = bool(APP_SETTINGS.get("songdo_enabled", False))
+        saeachim_enabled = bool(APP_SETTINGS.get("saeachim_enabled", True))
 
     def mark(enabled: bool) -> str:
         return "✅" if enabled else "⬜"
@@ -101,10 +111,12 @@ def settings_keyboard() -> dict[str, Any]:
             {"text": f"{mark(yeonsu_enabled)} 연수문화공원", "callback_data": "site:yeonsu"},
             {"text": f"{mark(songdo_enabled)} 달빛공원", "callback_data": "site:songdo"},
         ],
+        [{"text": f"{mark(saeachim_enabled)} 새아침테니스장", "callback_data": "site:saeachim"}],
         [
             {"text": "🏟️ 연수 설정", "callback_data": "site_menu:yeonsu"},
             {"text": "🌙 달빛 설정", "callback_data": "site_menu:songdo"},
         ],
+        [{"text": "🌅 새아침 설정", "callback_data": "site_menu:saeachim"}],
         [
             {"text": "📊 상태", "callback_data": "show:status"},
             {"text": "🔄 새로고침", "callback_data": "show:settings"},
@@ -118,18 +130,23 @@ def site_menu_keyboard(site: str) -> dict[str, Any]:
             [{"text": "🎾 A/B/C 코트 선택", "callback_data": "court_menu:yeonsu"}],
             [{"text": "⏰ 시간 설정", "callback_data": "time_menu:yeonsu"}],
         ]
-    else:
+    elif site == "songdo":
         rows = [
             [{"text": "🎾 5~14번 코트 선택", "callback_data": "court_menu:songdo"}],
             [{"text": "🌱 하드/인조잔디 선택", "callback_data": "surface_menu"}],
             [{"text": "⏰ 시간 설정", "callback_data": "time_menu:songdo"}],
+        ]
+    else:
+        rows = [
+            [{"text": "🎾 1~4코트 선택", "callback_data": "court_menu:saeachim"}],
+            [{"text": "⏰ 시간 설정", "callback_data": "time_menu:saeachim"}],
         ]
     rows.append([{"text": "⬅️ 전체 설정", "callback_data": "show:settings"}])
     return {"inline_keyboard": rows}
 
 
 def show_site_menu(site: str, message_id: int) -> None:
-    name = "연수문화공원" if site == "yeonsu" else "달빛공원"
+    name = {"yeonsu": "연수문화공원", "songdo": "달빛공원", "saeachim": "새아침테니스장"}[site]
     edit_telegram_message(message_id, f"⚙️ <b>{name} 설정</b>\n\n원하는 항목을 선택하세요.", site_menu_keyboard(site))
 
 
@@ -138,28 +155,37 @@ def court_settings_keyboard(site: str) -> dict[str, Any]:
         if site == "yeonsu":
             selected = set(APP_SETTINGS.get("courts", ["A", "B", "C"]))
             values = ["A", "B", "C"]
-        else:
+        elif site == "songdo":
             selected = set(APP_SETTINGS.get("songdo_courts", list(range(5, 15))))
             values = list(range(5, 15))
+        else:
+            selected = set(APP_SETTINGS.get("saeachim_courts", [1, 2, 3, 4]))
+            values = [1, 2, 3, 4]
     rows = []
     for i in range(0, len(values), 3):
         row = []
         for value in values[i:i+3]:
             mark = "✅" if value in selected else "⬜"
-            prefix = "court" if site == "yeonsu" else "songdo_court"
-            row.append({"text": f"{mark} {value}번" if site == "songdo" else f"{mark} {value}코트", "callback_data": f"{prefix}:{value}"})
+            prefix = "court" if site == "yeonsu" else f"{site}_court"
+            label = f"{mark} {value}코트" if site in {"yeonsu", "saeachim"} else f"{mark} {value}번"
+            row.append({"text": label, "callback_data": f"{prefix}:{value}"})
         rows.append(row)
     if site == "songdo":
         rows.append([{
             "text": "✅ 전체 선택" if len(selected) < 10 else "✅ 전체 선택됨",
             "callback_data": "songdo_courts:all" if len(selected) < 10 else "noop",
         }])
+    elif site == "saeachim":
+        rows.append([{
+            "text": "✅ 전체 선택" if len(selected) < 4 else "✅ 전체 선택됨",
+            "callback_data": "saeachim_courts:all" if len(selected) < 4 else "noop",
+        }])
     rows.append([{"text": "⬅️ 공원 설정", "callback_data": f"site_menu:{site}"}])
     return {"inline_keyboard": rows}
 
 
 def show_court_settings(site: str, message_id: int) -> None:
-    name = "연수문화공원" if site == "yeonsu" else "달빛공원"
+    name = {"yeonsu": "연수문화공원", "songdo": "달빛공원", "saeachim": "새아침테니스장"}[site]
     edit_telegram_message(message_id, f"🎾 <b>{name} 코트 선택</b>\n\n알림 받을 코트를 선택하세요.", court_settings_keyboard(site))
 
 
@@ -214,7 +240,7 @@ def time_settings_keyboard(site: str) -> dict[str, Any]:
 
 
 def show_time_settings(site: str, message_id: int) -> None:
-    name = "연수문화공원" if site == "yeonsu" else "달빛공원"
+    name = {"yeonsu": "연수문화공원", "songdo": "달빛공원", "saeachim": "새아침테니스장"}[site]
     weekday, weekend = site_hours_text(site)
     text = (
         f"⏰ <b>{name} 시간 설정</b>\n\n"
@@ -231,7 +257,7 @@ def slot_block(slot: dict[str, Any]) -> str:
         f"🎾 <b>{escape(slot['court'])}</b>\n"
         f"📅 {escape(slot['date'])}\n"
         f"🕐 {escape(slot['time'])}\n"
-        f"🔗 <a href=\"{escape(slot['url'])}\">예약하기</a>"
+        f"👉 <a href=\"{escape(slot['url'])}\"><b>예약하러 가기</b></a>"
     )
 
 
@@ -263,7 +289,7 @@ def status_text() -> str:
         f"상태: 🟢 실행 중\n"
         f"가동 시간: {hours}시간 {minutes}분\n"
         f"마지막 검사: {escape(stats.get('last_check_at') or '아직 없음')}\n"
-        f"현재 조건 일치: {current_count}개 (연수 {LAST_YEONSU_TARGETS} / 달빛 {LAST_SONGDO_TARGETS})\n"
+        f"현재 조건 일치: {current_count}개 (연수 {LAST_YEONSU_TARGETS} / 달빛 {LAST_SONGDO_TARGETS} / 새아침 {LAST_SAEACHIM_TARGETS})\n"
         f"전체 감지 빈자리: {LAST_TOTAL_SLOTS}개\n"
         f"달빛 조회: API 우선 / facilityId 10개 내장\n"
         f"최근 신규 알림: {LAST_NEW_COUNT}개\n\n"
@@ -327,7 +353,7 @@ def update_slots(targets: list[dict[str, Any]], initialize: bool = False) -> Non
 
 
 def monitor_loop() -> None:
-    global LAST_TOTAL_SLOTS, LAST_TARGET_COUNT, LAST_YEONSU_TARGETS, LAST_SONGDO_TARGETS, LAST_ERROR
+    global LAST_TOTAL_SLOTS, LAST_TARGET_COUNT, LAST_YEONSU_TARGETS, LAST_SONGDO_TARGETS, LAST_SAEACHIM_TARGETS, LAST_ERROR
     next_heartbeat = now_kst() + timedelta(hours=HEARTBEAT_HOURS)
     error_started_at: datetime | None = None
     error_alert_sent = False
@@ -349,6 +375,10 @@ def monitor_loop() -> None:
                     "songdo_enabled": bool(APP_SETTINGS.get("songdo_enabled", False)),
                     "songdo_courts": list(APP_SETTINGS.get("songdo_courts", range(5, 15))),
                     "songdo_surfaces": list(APP_SETTINGS.get("songdo_surfaces", ["hard", "artificial"])),
+                    "saeachim_weekday_hours": APP_SETTINGS.get("saeachim_weekday_hours"),
+                    "saeachim_weekend_hours": APP_SETTINGS.get("saeachim_weekend_hours"),
+                    "saeachim_enabled": bool(APP_SETTINGS.get("saeachim_enabled", True)),
+                    "saeachim_courts": list(APP_SETTINGS.get("saeachim_courts", [1, 2, 3, 4])),
                 }
 
             all_slots: list[dict[str, Any]] = []
@@ -361,6 +391,10 @@ def monitor_loop() -> None:
                 songdo_slots, songdo_errors = get_songdo_slots_with_status()
                 all_slots.extend(songdo_slots)
                 errors.extend(songdo_errors)
+            if settings["saeachim_enabled"]:
+                saeachim_slots, saeachim_errors = get_saeachim_slots_with_status(settings["saeachim_courts"])
+                all_slots.extend(saeachim_slots)
+                errors.extend(saeachim_errors)
             if errors:
                 raise RuntimeError(" | ".join(errors))
 
@@ -368,11 +402,13 @@ def monitor_loop() -> None:
 
             songdo_targets = [s for s in targets if s.get("site") == "songdo"]
             yeonsu_targets = [s for s in targets if s.get("site") == "yeonsu"]
+            saeachim_targets = [s for s in targets if s.get("site") == "saeachim"]
 
             LAST_TOTAL_SLOTS = len(all_slots)
             LAST_TARGET_COUNT = len(targets)
             LAST_YEONSU_TARGETS = len(yeonsu_targets)
             LAST_SONGDO_TARGETS = len(songdo_targets)
+            LAST_SAEACHIM_TARGETS = len(saeachim_targets)
 
             with STATE_LOCK:
                 APP_STATE["stats"]["checks"] += 1
@@ -404,7 +440,7 @@ def monitor_loop() -> None:
 
             log(
                 "OK",
-                f"전체 {LAST_TOTAL_SLOTS} | 조건 연수 {LAST_YEONSU_TARGETS}·달빛 {LAST_SONGDO_TARGETS} | 신규 {LAST_NEW_COUNT} | {CHECK_INTERVAL}초 후",
+                f"전체 {LAST_TOTAL_SLOTS} | 조건 연수 {LAST_YEONSU_TARGETS}·달빛 {LAST_SONGDO_TARGETS}·새아침 {LAST_SAEACHIM_TARGETS} | 신규 {LAST_NEW_COUNT} | {CHECK_INTERVAL}초 후",
             )
 
         except Exception as exc:
@@ -444,16 +480,22 @@ def apply_callback(data: str) -> str:
     with STATE_LOCK:
         if data == "site:yeonsu":
             enabled = not bool(APP_SETTINGS.get("yeonsu_enabled", True))
-            if not enabled and not bool(APP_SETTINGS.get("songdo_enabled", False)):
+            if not enabled and not bool(APP_SETTINGS.get("songdo_enabled", False)) and not bool(APP_SETTINGS.get("saeachim_enabled", True)):
                 return "감시 사이트는 최소 1개가 필요합니다."
             APP_SETTINGS["yeonsu_enabled"] = enabled
             result = f"연수문화공원 감시 {'켬' if enabled else '끔'}"
         elif data == "site:songdo":
             enabled = not bool(APP_SETTINGS.get("songdo_enabled", False))
-            if not enabled and not bool(APP_SETTINGS.get("yeonsu_enabled", True)):
+            if not enabled and not bool(APP_SETTINGS.get("yeonsu_enabled", True)) and not bool(APP_SETTINGS.get("saeachim_enabled", True)):
                 return "감시 사이트는 최소 1개가 필요합니다."
             APP_SETTINGS["songdo_enabled"] = enabled
             result = f"달빛공원 감시 {'켬' if enabled else '끔'}"
+        elif data == "site:saeachim":
+            enabled = not bool(APP_SETTINGS.get("saeachim_enabled", True))
+            if not enabled and not bool(APP_SETTINGS.get("yeonsu_enabled", True)) and not bool(APP_SETTINGS.get("songdo_enabled", False)):
+                return "감시 사이트는 최소 1개가 필요합니다."
+            APP_SETTINGS["saeachim_enabled"] = enabled
+            result = f"새아침테니스장 감시 {'켬' if enabled else '끔'}"
         elif data.startswith("court:"):
             court = data.split(":", 1)[1]
             courts = set(APP_SETTINGS["courts"])
@@ -484,6 +526,21 @@ def apply_callback(data: str) -> str:
             result = "달빛 코트 전체 선택"
         elif data == "songdo_courts:none":
             return "달빛 코트는 최소 1개가 필요합니다."
+        elif data.startswith("saeachim_court:"):
+            court = int(data.split(":", 1)[1])
+            courts = set(APP_SETTINGS.get("saeachim_courts", [1, 2, 3, 4]))
+            if court in courts and len(courts) > 1:
+                courts.remove(court)
+                result = f"새아침 {court}코트 알림 끔"
+            elif court not in courts:
+                courts.add(court)
+                result = f"새아침 {court}코트 알림 켬"
+            else:
+                return "새아침 코트는 최소 1개가 필요합니다."
+            APP_SETTINGS["saeachim_courts"] = sorted(courts)
+        elif data == "saeachim_courts:all":
+            APP_SETTINGS["saeachim_courts"] = [1, 2, 3, 4]
+            result = "새아침 코트 전체 선택"
         elif data.startswith("surface:"):
             surface = data.split(":", 1)[1]
             selected = set(APP_SETTINGS.get("songdo_surfaces", ["hard", "artificial"]))
@@ -498,7 +555,7 @@ def apply_callback(data: str) -> str:
             APP_SETTINGS["songdo_surfaces"] = sorted(selected)
         elif data.startswith("time:"):
             _, site, day_type, value = data.split(":", 3)
-            if site not in {"yeonsu", "songdo"} or day_type not in {"weekday", "weekend"}:
+            if site not in {"yeonsu", "songdo", "saeachim"} or day_type not in {"weekday", "weekend"}:
                 return "잘못된 시간 설정입니다."
             key = f"{site}_{day_type}_hours"
             if value == "all":
@@ -551,14 +608,14 @@ def handle_update(update: dict[str, Any]) -> None:
         if data.startswith("site_menu:"):
             site = data.split(":", 1)[1]
             answer_callback_query(callback["id"])
-            if message_id and site in {"yeonsu", "songdo"}:
+            if message_id and site in {"yeonsu", "songdo", "saeachim"}:
                 show_site_menu(site, message_id)
             return
 
         if data.startswith("court_menu:"):
             site = data.split(":", 1)[1]
             answer_callback_query(callback["id"])
-            if message_id and site in {"yeonsu", "songdo"}:
+            if message_id and site in {"yeonsu", "songdo", "saeachim"}:
                 show_court_settings(site, message_id)
             return
 
@@ -571,7 +628,7 @@ def handle_update(update: dict[str, Any]) -> None:
         if data.startswith("time_menu:"):
             site = data.split(":", 1)[1]
             answer_callback_query(callback["id"])
-            if message_id and site in {"yeonsu", "songdo"}:
+            if message_id and site in {"yeonsu", "songdo", "saeachim"}:
                 show_time_settings(site, message_id)
             return
 
@@ -587,6 +644,8 @@ def handle_update(update: dict[str, Any]) -> None:
                 show_time_settings(site, message_id)
             elif data.startswith("songdo_court:") or data.startswith("songdo_courts:"):
                 show_court_settings("songdo", message_id)
+            elif data.startswith("saeachim_court:") or data.startswith("saeachim_courts:"):
+                show_court_settings("saeachim", message_id)
             elif data.startswith("court:"):
                 show_court_settings("yeonsu", message_id)
             elif data.startswith("surface:"):
@@ -661,7 +720,7 @@ def main() -> None:
         ok = send_telegram_message(f"✅ <b>텔레그램 연결 정상</b>\n{now_str()}")
         raise SystemExit(0 if ok else 1)
 
-    log("START", "ChaenissBot v7.0 API FINAL 실행")
+    log("START", "ChaenissBot v7.1 새아침 추가 실행")
     log("INFO", settings_text().replace("<b>", "").replace("</b>", "").replace("\n", " | "))
 
     command_thread = threading.Thread(
