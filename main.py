@@ -56,19 +56,27 @@ def hours_text(hours: list[int] | None) -> str:
     return ", ".join(f"{h:02d}~{h + 2:02d}" for h in hours)
 
 
+def site_hours_text(site: str) -> tuple[str, str]:
+    with STATE_LOCK:
+        weekday = APP_SETTINGS.get(f"{site}_weekday_hours", APP_SETTINGS.get("weekday_hours"))
+        weekend = APP_SETTINGS.get(f"{site}_weekend_hours", APP_SETTINGS.get("weekend_hours"))
+    return hours_text(weekday), hours_text(weekend)
+
+
 def settings_text() -> str:
     with STATE_LOCK:
         courts = "/".join(APP_SETTINGS["courts"])
-        weekday = hours_text(APP_SETTINGS["weekday_hours"])
-        weekend = hours_text(APP_SETTINGS["weekend_hours"])
         yeonsu_enabled = bool(APP_SETTINGS.get("yeonsu_enabled", True))
         songdo_enabled = bool(APP_SETTINGS.get("songdo_enabled", False))
+    y_weekday, y_weekend = site_hours_text("yeonsu")
+    d_weekday, d_weekend = site_hours_text("songdo")
     return (
         f"🏟️ 연수문화공원: <b>{'켜짐' if yeonsu_enabled else '꺼짐'}</b>\n"
-        f"🌙 달빛공원(베타): <b>{'켜짐' if songdo_enabled else '꺼짐'}</b>\n"
-        f"🎾 연수 코트: <b>{escape(courts)}</b>\n"
-        f"📆 평일: <b>{escape(weekday)}</b>\n"
-        f"🌈 주말: <b>{escape(weekend)}</b>\n"
+        f"　평일 <b>{escape(y_weekday)}</b> / 주말 <b>{escape(y_weekend)}</b>\n"
+        f"　코트 <b>{escape(courts)}</b>\n"
+        f"🌙 달빛공원: <b>{'켜짐' if songdo_enabled else '꺼짐'}</b>\n"
+        f"　평일 <b>{escape(d_weekday)}</b> / 주말 <b>{escape(d_weekend)}</b>\n"
+        f"　코트 <b>5~14번</b>\n"
         f"🔁 검사 주기: <b>{CHECK_INTERVAL}초</b>"
     )
 
@@ -76,8 +84,6 @@ def settings_text() -> str:
 def settings_keyboard() -> dict[str, Any]:
     with STATE_LOCK:
         courts = set(APP_SETTINGS["courts"])
-        weekday_all = APP_SETTINGS["weekday_hours"] is None
-        weekend_all = APP_SETTINGS["weekend_hours"] is None
         yeonsu_enabled = bool(APP_SETTINGS.get("yeonsu_enabled", True))
         songdo_enabled = bool(APP_SETTINGS.get("songdo_enabled", False))
 
@@ -88,7 +94,11 @@ def settings_keyboard() -> dict[str, Any]:
         "inline_keyboard": [
             [
                 {"text": f"{mark(yeonsu_enabled)} 연수문화공원", "callback_data": "site:yeonsu"},
-                {"text": f"{mark(songdo_enabled)} 달빛공원 β", "callback_data": "site:songdo"},
+                {"text": f"{mark(songdo_enabled)} 달빛공원", "callback_data": "site:songdo"},
+            ],
+            [
+                {"text": "🏟️ 연수 시간 설정", "callback_data": "time_menu:yeonsu"},
+                {"text": "🌙 달빛 시간 설정", "callback_data": "time_menu:songdo"},
             ],
             [
                 {"text": f"{mark('A' in courts)} A코트", "callback_data": "court:A"},
@@ -96,31 +106,58 @@ def settings_keyboard() -> dict[str, Any]:
                 {"text": f"{mark('C' in courts)} C코트", "callback_data": "court:C"},
             ],
             [
-                {
-                    "text": f"{mark(not weekday_all)} 평일 20~22",
-                    "callback_data": "weekday:20",
-                },
-                {
-                    "text": f"{mark(weekday_all)} 평일 전 시간",
-                    "callback_data": "weekday:all",
-                },
-            ],
-            [
-                {
-                    "text": f"{mark(weekend_all)} 주말 전 시간",
-                    "callback_data": "weekend:all",
-                },
-                {
-                    "text": f"{mark(not weekend_all)} 주말 20~22",
-                    "callback_data": "weekend:20",
-                },
-            ],
-            [
                 {"text": "📊 상태·통계", "callback_data": "show:status"},
                 {"text": "🔄 새로고침", "callback_data": "show:settings"},
             ],
         ]
     }
+
+
+def time_settings_keyboard(site: str) -> dict[str, Any]:
+    with STATE_LOCK:
+        weekday = APP_SETTINGS.get(f"{site}_weekday_hours")
+        weekend = APP_SETTINGS.get(f"{site}_weekend_hours")
+
+    def mark_selected(hours: list[int] | None, hour: int) -> str:
+        return "✅" if hours is not None and hour in hours else "⬜"
+
+    def all_mark(hours: list[int] | None) -> str:
+        return "✅" if hours is None else "⬜"
+
+    rows: list[list[dict[str, str]]] = []
+    rows.append([{"text": "평일 시간", "callback_data": "noop"}])
+    for a, b in ((6, 8), (10, 12), (14, 16), (18, 20)):
+        rows.append([
+            {"text": f"{mark_selected(weekday, a)} {a:02d}~{a+2:02d}", "callback_data": f"time:{site}:weekday:{a}"},
+            {"text": f"{mark_selected(weekday, b)} {b:02d}~{b+2:02d}", "callback_data": f"time:{site}:weekday:{b}"},
+        ])
+    rows.append([
+        {"text": f"{all_mark(weekday)} 평일 모든 시간", "callback_data": f"time:{site}:weekday:all"}
+    ])
+    rows.append([{"text": "주말 시간", "callback_data": "noop"}])
+    for a, b in ((6, 8), (10, 12), (14, 16), (18, 20)):
+        rows.append([
+            {"text": f"{mark_selected(weekend, a)} {a:02d}~{a+2:02d}", "callback_data": f"time:{site}:weekend:{a}"},
+            {"text": f"{mark_selected(weekend, b)} {b:02d}~{b+2:02d}", "callback_data": f"time:{site}:weekend:{b}"},
+        ])
+    rows.append([
+        {"text": f"{all_mark(weekend)} 주말 모든 시간", "callback_data": f"time:{site}:weekend:all"}
+    ])
+    rows.append([{"text": "⬅️ 설정으로", "callback_data": "show:settings"}])
+    return {"inline_keyboard": rows}
+
+
+def show_time_settings(site: str, message_id: int) -> None:
+    name = "연수문화공원" if site == "yeonsu" else "달빛공원"
+    weekday, weekend = site_hours_text(site)
+    text = (
+        f"⏰ <b>{name} 시간 설정</b>\n\n"
+        "원하는 시간을 여러 개 선택할 수 있어요.\n"
+        "‘모든 시간’을 누르면 시간 제한이 해제됩니다.\n\n"
+        f"평일: <b>{escape(weekday)}</b>\n"
+        f"주말: <b>{escape(weekend)}</b>"
+    )
+    edit_telegram_message(message_id, text, time_settings_keyboard(site))
 
 
 def slot_block(slot: dict[str, Any]) -> str:
@@ -184,7 +221,8 @@ def update_slots(targets: list[dict[str, Any]], initialize: bool = False) -> Non
     with STATE_LOCK:
         previous_raw = APP_STATE.get("current_keys", [])
         previous_keys = set(previous_raw)
-        first_run = initialize or APP_STATE["stats"]["checks"] == 0
+        reset_baseline = bool(APP_STATE.pop("reset_baseline", False))
+        first_run = initialize or APP_STATE["stats"]["checks"] == 0 or reset_baseline
         APP_STATE["current_keys"] = sorted(current_keys)
 
     if first_run:
@@ -230,8 +268,12 @@ def monitor_loop() -> None:
             with STATE_LOCK:
                 settings = {
                     "courts": list(APP_SETTINGS["courts"]),
-                    "weekday_hours": APP_SETTINGS["weekday_hours"],
-                    "weekend_hours": APP_SETTINGS["weekend_hours"],
+                    "weekday_hours": APP_SETTINGS.get("weekday_hours"),
+                    "weekend_hours": APP_SETTINGS.get("weekend_hours"),
+                    "yeonsu_weekday_hours": APP_SETTINGS.get("yeonsu_weekday_hours"),
+                    "yeonsu_weekend_hours": APP_SETTINGS.get("yeonsu_weekend_hours"),
+                    "songdo_weekday_hours": APP_SETTINGS.get("songdo_weekday_hours"),
+                    "songdo_weekend_hours": APP_SETTINGS.get("songdo_weekend_hours"),
                     "yeonsu_enabled": bool(APP_SETTINGS.get("yeonsu_enabled", True)),
                     "songdo_enabled": bool(APP_SETTINGS.get("songdo_enabled", False)),
                 }
@@ -259,11 +301,6 @@ def monitor_loop() -> None:
                 f"연수 대상 {len(yeonsu_targets)}개 | 달빛 대상 {len(songdo_targets)}개",
             )
 
-            for slot in songdo_targets:
-                log(
-                    "INFO",
-                    f"[DALBIT TARGET] {slot['court']} {slot['date']} {slot['time']}",
-                )
 
             LAST_TOTAL_SLOTS = len(all_slots)
             LAST_TARGET_COUNT = len(targets)
@@ -362,23 +399,32 @@ def apply_callback(data: str) -> str:
                 return "코트는 최소 1개가 필요합니다."
             APP_SETTINGS["courts"] = sorted(courts)
 
-        elif data == "weekday:20":
-            APP_SETTINGS["weekday_hours"] = [20]
-            result = "평일 20~22시만 알림"
-        elif data == "weekday:all":
-            APP_SETTINGS["weekday_hours"] = None
-            result = "평일 모든 시간 알림"
-        elif data == "weekend:20":
-            APP_SETTINGS["weekend_hours"] = [20]
-            result = "주말 20~22시만 알림"
-        elif data == "weekend:all":
-            APP_SETTINGS["weekend_hours"] = None
-            result = "주말 모든 시간 알림"
+        elif data.startswith("time:"):
+            _, site, day_type, value = data.split(":", 3)
+            if site not in {"yeonsu", "songdo"} or day_type not in {"weekday", "weekend"}:
+                return "잘못된 시간 설정입니다."
+            key = f"{site}_{day_type}_hours"
+            if value == "all":
+                APP_SETTINGS[key] = None
+                result = "모든 시간 알림으로 변경"
+            else:
+                hour = int(value)
+                current = APP_SETTINGS.get(key)
+                # 모든 시간 상태에서 개별 시간을 누르면 그 시간만 선택합니다.
+                selected = set() if current is None else set(current)
+                if hour in selected:
+                    selected.remove(hour)
+                    result = f"{hour:02d}~{hour+2:02d} 알림 끔"
+                else:
+                    selected.add(hour)
+                    result = f"{hour:02d}~{hour+2:02d} 알림 켬"
+                APP_SETTINGS[key] = sorted(selected)
         else:
             return "새로고침했습니다."
 
         # 설정 변경 후 기존 키를 초기화하여 새 조건에서 과거 상태가 섞이지 않게 합니다.
         APP_STATE["current_keys"] = []
+        APP_STATE["reset_baseline"] = True
         save_settings(APP_SETTINGS)
         save_state(APP_STATE)
         return result
@@ -405,10 +451,25 @@ def handle_update(update: dict[str, Any]) -> None:
                 )
             return
 
+        if data.startswith("time_menu:"):
+            site = data.split(":", 1)[1]
+            answer_callback_query(callback["id"])
+            if message_id and site in {"yeonsu", "songdo"}:
+                show_time_settings(site, message_id)
+            return
+
+        if data == "noop":
+            answer_callback_query(callback["id"])
+            return
+
         result = apply_callback(data)
         answer_callback_query(callback["id"], result)
         if message_id:
-            show_settings(message_id)
+            if data.startswith("time:"):
+                site = data.split(":", 2)[1]
+                show_time_settings(site, message_id)
+            else:
+                show_settings(message_id)
         return
 
     message = update.get("message")
@@ -477,7 +538,7 @@ def main() -> None:
         ok = send_telegram_message(f"✅ <b>텔레그램 연결 정상</b>\n{now_str()}")
         raise SystemExit(0 if ok else 1)
 
-    log("START", "ChaenissBot v6.1.14 EXACT-TIME 진단 실행")
+    log("START", "ChaenissBot v6.8 SITE-SPECIFIC SETTINGS 실행")
     log("INFO", settings_text().replace("<b>", "").replace("</b>", "").replace("\n", " | "))
 
     command_thread = threading.Thread(

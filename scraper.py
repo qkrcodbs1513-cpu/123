@@ -113,9 +113,15 @@ def matches_settings(slot: dict[str, Any], settings: dict[str, Any]) -> bool:
     if slot.get("site", "yeonsu") == "yeonsu" and slot["court_code"] not in settings["courts"]:
         return False
 
+    site = slot.get("site", "yeonsu")
     weekday_num = int(slot["weekday_num"])
     start_hour = int(slot["start_hour"])
-    hours = settings["weekend_hours"] if weekday_num >= 5 else settings["weekday_hours"]
+    prefix = "songdo" if site == "songdo" else "yeonsu"
+    day_type = "weekend" if weekday_num >= 5 else "weekday"
+    hours = settings.get(f"{prefix}_{day_type}_hours")
+    # 이전 설정 파일과의 호환
+    if f"{prefix}_{day_type}_hours" not in settings:
+        hours = settings.get(f"{day_type}_hours")
     return hours is None or start_hour in hours
 
 
