@@ -1,16 +1,26 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
-from config import REQUEST_TIMEOUT, SAEACHIM_URL
+from config import REQUEST_TIMEOUT
 
 KST = timezone(timedelta(hours=9))
 WEEKDAYS_KO = ["월", "화", "수", "목", "금", "토", "일"]
-TIME_RE = re.compile(r"(?P<sh>\d{1,2}):(?P<sm>\d{2})\s*[~\-–—]\s*(?P<eh>\d{1,2}):(?P<em>\d{2})")
 TARGET_COURTS = (1, 2, 3, 4)
-CANONICAL_SAEACHIM_URL = "https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07"
+TIME_RE = re.compile(r"(?P<sh>\d{1,2}):(?P<sm>\d{2})\s*[~\-–—]\s*(?P<eh>\d{1,2}):(?P<em>\d{2})")
+DATE_RE = re.compile(r"(?P<y>20\d{2})[.\-/년\s]+(?P<m>\d{1,2})[.\-/월\s]+(?P<d>\d{1,2})")
+
+# 공식 SSO 진입 주소. direct res 주소는 비로그인/세션 상태에서 reserve 메인으로 튕길 수 있다.
+SSO_URL = (
+    "https://www.insiseol.or.kr/member/memberReserveSSO.do?return_uri="
+    + quote("/login/newresSSO.do!up_id=07!return_uri=rent/rentalSchedule", safe="")
+)
+RES_URL = "https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07"
+RESERVE_URL = "https://reserve.insiseol.or.kr/"
 
 
 def _log(message: str) -> None:
@@ -27,7 +37,10 @@ def _make_slot(court_num: int, date_raw: str, text: str) -> dict[str, Any] | Non
         return None
     sh, sm = int(match["sh"]), int(match["sm"])
     eh, em = int(match["eh"]), int(match["em"])
-    date_obj = datetime.strptime(date_raw, "%Y-%m-%d").date()
+    try:
+        date_obj = datetime.strptime(date_raw, "%Y-%m-%d").date()
+    except ValueError:
+        return None
     return {
         "site": "saeachim",
         "court_code": f"N{court_num}",
@@ -38,157 +51,219 @@ def _make_slot(court_num: int, date_raw: str, text: str) -> dict[str, Any] | Non
         "time": f"{sh:02d}:{sm:02d}~{eh:02d}:{em:02d}",
         "start_hour": sh,
         "weekday_num": date_obj.weekday(),
-        "url": CANONICAL_SAEACHIM_URL,
+        "url": SSO_URL,
     }
 
 
-def _select_option_containing(select: Any, text: str, timeout_ms: int = 10000) -> bool:
-    elapsed = 0
-    while elapsed < timeout_ms:
-        options = select.locator("option")
-        for i in range(options.count()):
-            option = options.nth(i)
+def _body_text(page: Any) -> str:
+    try:
+        return page.locator("body").inner_text(timeout=2500)
+    except Exception:
+        return ""
+
+
+def _goto_schedule(page: Any) -> None:
+    """SSO → 대관 페이지 순서로 진입하고, 메인으로 튕기면 한 번 복구한다."""
+    deadline = time.monotonic() + max(20, REQUEST_TIMEOUT * 2)
+    last_error: Exception | None = None
+    for url, label in ((SSO_URL, "SSO"), (RES_URL, "직접")):
+        if time.monotonic() >= deadline:
+            break
+        try:
+            response = page.goto(url, wait_until="domcontentloaded", timeout=min(15000, REQUEST_TIMEOUT * 1000))
+            page.wait_for_timeout(1200)
+            status = response.status if response else "no-response"
+            _log(f"{label} 접속 — HTTP {status} / {page.url}")
+            text = _body_text(page)
+            if "새아침" in text or "대관신청" in text or "rentalSchedule" in page.url:
+                return
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"대관 화면 진입 실패 (최종 URL: {page.url})" + (f" / {last_error}" if last_error else ""))
+
+
+def _select_by_text(page: Any, selectors: list[str], needles: list[str]) -> bool:
+    """id가 바뀌어도 모든 select를 검색해 텍스트가 맞는 option을 선택한다."""
+    seen: set[str] = set()
+    for selector in selectors + ["select"]:
+        try:
+            loc = page.locator(selector)
+            count = min(loc.count(), 30)
+        except Exception:
+            continue
+        for i in range(count):
+            select = loc.nth(i)
             try:
-                label = (option.inner_text(timeout=300) or "").strip()
+                key = select.evaluate("e => e.id + '|' + e.name")
+                if key in seen:
+                    continue
+                seen.add(key)
+                options = select.locator("option")
+                for j in range(options.count()):
+                    option = options.nth(j)
+                    label = re.sub(r"\s+", " ", option.inner_text(timeout=500) or "").strip()
+                    if any(n in label for n in needles):
+                        value = option.get_attribute("value")
+                        select.select_option(value=value) if value is not None else select.select_option(label=label)
+                        page.wait_for_timeout(700)
+                        return True
             except Exception:
                 continue
-            if text in label:
-                value = option.get_attribute("value")
-                if value is not None:
-                    select.select_option(value=value)
-                else:
-                    select.select_option(label=label)
-                return True
-        select.page.wait_for_timeout(250)
-        elapsed += 250
     return False
 
 
-def _wait_calendar(page: Any) -> None:
-    page.wait_for_function(
+def _click_text(page: Any, needles: list[str]) -> bool:
+    """select가 아닌 버튼/링크 UI일 때 텍스트로 선택한다."""
+    for needle in needles:
+        for selector in ("button", "a", "label", "li", "div[role=button]"):
+            try:
+                candidates = page.locator(selector).filter(has_text=needle)
+                for i in range(min(candidates.count(), 15)):
+                    node = candidates.nth(i)
+                    if node.is_visible(timeout=300):
+                        node.click(timeout=2000)
+                        page.wait_for_timeout(700)
+                        return True
+            except Exception:
+                continue
+    return False
+
+
+def _choose_facility_and_court(page: Any, court_num: int) -> None:
+    facility_ok = _select_by_text(
+        page,
+        ["#main_rent_idx", "select[name*=main]", "select[name*=rent]", "select[name*=facility]"],
+        ["새아침테니스장", "새아침"],
+    ) or _click_text(page, ["새아침테니스장", "새아침"])
+
+    # 페이지가 이미 새아침 전용 화면이면 시설 선택이 없어도 통과.
+    if not facility_ok and "새아침" not in _body_text(page):
+        raise RuntimeError("새아침 시설 선택 항목을 찾지 못했습니다.")
+
+    court_needles = [f"{court_num}코트", f"{court_num} 코트", f"제{court_num}코트"]
+    court_ok = _select_by_text(
+        page,
+        ["#sf_idx", "select[name*=sf]", "select[name*=court]", "select[name*=facility]"],
+        court_needles,
+    ) or _click_text(page, court_needles)
+    if not court_ok:
+        raise RuntimeError(f"{court_num}코트 선택 항목을 찾지 못했습니다.")
+
+    # 조회/검색 버튼이 있으면 누르고, 자동 갱신형이면 그대로 진행.
+    for needle in ("조회", "검색", "확인"):
+        try:
+            button = page.get_by_role("button", name=re.compile(needle)).first
+            if button.count() and button.is_visible(timeout=300):
+                button.click(timeout=2000)
+                page.wait_for_timeout(1000)
+                break
+        except Exception:
+            pass
+    try:
+        if page.locator("#btn_search").count() and page.locator("#btn_search").is_visible(timeout=300):
+            page.locator("#btn_search").click(timeout=2000)
+            page.wait_for_timeout(1000)
+    except Exception:
+        pass
+
+
+def _infer_month(page: Any) -> tuple[int, int]:
+    now = datetime.now(KST)
+    text = _body_text(page)
+    patterns = [
+        r"(20\d{2})\s*[.년/-]\s*(\d{1,2})\s*월?",
+        r"(20\d{2})(\d{2})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            year, month = int(match.group(1)), int(match.group(2))
+            if 1 <= month <= 12 and now.year - 1 <= year <= now.year + 2:
+                return year, month
+    return now.year, now.month
+
+
+def _extract_slots(page: Any, court_num: int) -> list[dict[str, Any]]:
+    year, month = _infer_month(page)
+    today = datetime.now(KST).date()
+    raw = page.evaluate(
         """() => {
-          const body = document.querySelector('#cal_body');
-          return !!(body && body.querySelectorAll('td').length > 0 && /\\d{1,2}:\\d{2}/.test(body.innerText || ''));
-        }""",
-        timeout=REQUEST_TIMEOUT * 1000,
+          const out = [];
+          const candidates = [...document.querySelectorAll('td, li, tr, .day, .date, .calendar-day, [data-date]')];
+          for (const node of candidates) {
+            const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (!/\\d{1,2}:\\d{2}\\s*[~\\-–—]\\s*\\d{1,2}:\\d{2}/.test(text)) continue;
+            const dateAttr = node.getAttribute('data-date') || node.getAttribute('data-day') || '';
+            const cls = String(node.className || '').toLowerCase();
+            const nodes = [...node.querySelectorAll('a,button,input,label,span,li,p,div')];
+            const times = [];
+            for (const el of nodes.length ? nodes : [node]) {
+              const t = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+              if (!/\\d{1,2}:\\d{2}\\s*[~\\-–—]\\s*\\d{1,2}:\\d{2}/.test(t)) continue;
+              const style = getComputedStyle(el);
+              const ecls = String(el.className || '').toLowerCase();
+              const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true';
+              const unavailable = /(마감|예약완료|불가|종료|closed|disabled|disable|finish|sold|end|off)/i.test(t + ' ' + ecls + ' ' + cls);
+              const struck = String(style.textDecorationLine || style.textDecoration || '').includes('line-through');
+              const clickable = ['A','BUTTON','INPUT','LABEL'].includes(el.tagName) || !!el.onclick || !!el.getAttribute('href');
+              const availableWord = /(예약가능|신청가능|접수가능|가능)/.test(t);
+              if (!disabled && !unavailable && !struck && (clickable || availableWord)) times.push(t);
+            }
+            out.push({text, dateAttr, times:[...new Set(times)]});
+          }
+          return out;
+        }"""
     )
 
-
-def _calendar_month(page: Any) -> tuple[int, int]:
-    text = page.locator("div.schedule div.month p").inner_text(timeout=2000)
-    nums = [int(x) for x in re.findall(r"\d+", text)]
-    if len(nums) < 2:
-        raise RuntimeError(f"달력 연월을 읽지 못했습니다: {text!r}")
-    return nums[0], nums[1]
-
-
-def _extract_current_calendar(page: Any, court_num: int) -> list[dict[str, Any]]:
-    year, month = _calendar_month(page)
-    rows = page.locator("#cal_body td")
     result: list[dict[str, Any]] = []
-
-    for i in range(rows.count()):
-        cell = rows.nth(i)
-        payload = cell.evaluate(
-            """td => {
-              const dayNode = td.querySelector('.day, .date, .num, strong, em, span, p, div');
-              const allText = (td.innerText || '').trim();
-              let day = '';
-              const candidates = [...td.querySelectorAll('span,strong,em,p,div')];
-              for (const el of candidates) {
-                const t = (el.textContent || '').trim();
-                if (/^\\d{1,2}$/.test(t)) { day = t; break; }
-              }
-              if (!day) {
-                const m = allText.match(/(^|\\n)\\s*(\\d{1,2})\\s*(\\n|$)/);
-                if (m) day = m[2];
-              }
-              const times = [];
-              const nodes = [...td.querySelectorAll('a,button,span,li,p,div')];
-              for (const el of nodes) {
-                const text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
-                if (!/\\d{1,2}:\\d{2}\\s*[~\\-–—]\\s*\\d{1,2}:\\d{2}/.test(text)) continue;
-                const style = getComputedStyle(el);
-                const deco = `${style.textDecoration || ''} ${style.textDecorationLine || ''}`.toLowerCase();
-                const cls = String(el.className || '').toLowerCase();
-                const aria = String(el.getAttribute('aria-disabled') || '').toLowerCase();
-                const disabled = el.disabled === true || aria === 'true';
-                const struck = deco.includes('line-through') || deco.includes('line through');
-                const unavailableClass = /(disabled|disable|closed|finish|sold|end|off|gray|grey)/.test(cls);
-                const clickable = el.tagName === 'A' || el.tagName === 'BUTTON' || !!el.getAttribute('onclick') || !!el.getAttribute('href');
-                if (!disabled && !struck && !unavailableClass && clickable) {
-                  times.push(text);
-                }
-              }
-              return {day, times: [...new Set(times)]};
-            }"""
-        )
-        day_text = str(payload.get("day") or "").strip()
-        if not day_text.isdigit():
+    for row in raw or []:
+        text = str(row.get("text") or "")
+        date_attr = str(row.get("dateAttr") or "")
+        date_raw = ""
+        match = DATE_RE.search(date_attr + " " + text)
+        if match:
+            try:
+                date_raw = datetime(int(match["y"]), int(match["m"]), int(match["d"])).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        else:
+            day_match = re.search(r"(?:^|\s)(\d{1,2})(?:일|\s|$)", text)
+            if not day_match:
+                continue
+            day = int(day_match.group(1))
+            try:
+                date_raw = datetime(year, month, day).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        if date_raw < today.isoformat():
             continue
-        day = int(day_text)
-        try:
-            date_raw = datetime(year, month, day).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-        if date_raw < datetime.now(KST).date().isoformat():
-            continue
-        for text in payload.get("times") or []:
-            slot = _make_slot(court_num, date_raw, str(text))
+        for time_text in row.get("times") or []:
+            slot = _make_slot(court_num, date_raw, str(time_text))
             if slot:
                 result.append(slot)
     return result
 
 
-def _click_next_month(page: Any) -> bool:
-    before = page.locator("div.schedule div.month p").inner_text(timeout=1500)
-    page.locator("div.schedule .btn_next a").click(timeout=3000)
-    try:
-        page.wait_for_function(
-            """before => {
-              const p = document.querySelector('div.schedule div.month p');
-              return p && (p.innerText || '').trim() !== before.trim();
-            }""",
-            before,
-            timeout=5000,
-        )
-        _wait_calendar(page)
-        return True
-    except Exception:
-        return False
+def _next_month(page: Any) -> bool:
+    before = _infer_month(page)
+    for selector in (
+        "a[title*='다음']", "button[title*='다음']", ".btn_next a", ".next a", ".calendar-next",
+    ):
+        try:
+            node = page.locator(selector).first
+            if node.count() and node.is_visible(timeout=300):
+                node.click(timeout=2000)
+                page.wait_for_timeout(1200)
+                return _infer_month(page) != before
+        except Exception:
+            continue
+    return _click_text(page, ["다음 달", "다음달"])
 
 
-
-def _open_schedule_page(page: Any) -> None:
-    """새아침 대관 달력으로 직접 진입합니다.
-
-    Railway에 예전 SAEACHIM_URL 값(reserve 메인 주소)이 남아 있어도
-    실제 대관 페이지인 res.insiseol.or.kr 주소를 우선 사용합니다.
-    """
-    configured = (SAEACHIM_URL or "").strip()
-    target = configured if "res.insiseol.or.kr/rent/rentalSchedule" in configured else CANONICAL_SAEACHIM_URL
-
-    response = page.goto(target, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
-    status = response.status if response else "no-response"
-    _log(f"대관 페이지 접속 — HTTP {status} / {page.url}")
-
-    # 통합예약 메인으로 튕긴 경우 실제 대관 도메인으로 한 번 더 강제 진입합니다.
-    if "res.insiseol.or.kr/rent/rentalSchedule" not in page.url:
-        response = page.goto(CANONICAL_SAEACHIM_URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
-        status = response.status if response else "no-response"
-        _log(f"대관 페이지 재접속 — HTTP {status} / {page.url}")
-
-    page.wait_for_selector("#main_rent_idx", state="attached", timeout=REQUEST_TIMEOUT * 1000)
-    page.wait_for_selector("#sf_idx", state="attached", timeout=REQUEST_TIMEOUT * 1000)
-
-
-def get_saeachim_slots_with_status(
-    enabled_courts: list[int] | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
+def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
     courts = sorted({int(x) for x in (enabled_courts or TARGET_COURTS) if int(x) in TARGET_COURTS})
     slots: list[dict[str, Any]] = []
     errors: list[str] = []
-
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -196,37 +271,35 @@ def get_saeachim_slots_with_status(
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
             context = browser.new_context(locale="ko-KR", timezone_id="Asia/Seoul")
             page = context.new_page()
-            page.set_default_timeout(REQUEST_TIMEOUT * 1000)
+            page.set_default_timeout(min(8000, REQUEST_TIMEOUT * 1000))
+
             for court_num in courts:
+                started = time.monotonic()
                 try:
-                    # 코트마다 실제 대관 페이지로 새로 진입해 현재 월부터 확인합니다.
-                    _open_schedule_page(page)
+                    _goto_schedule(page)
                     _log(f"{court_num}코트 선택 시작")
-                    main_select = page.locator("#main_rent_idx")
-                    if not _select_option_containing(main_select, "새아침"):
-                        raise RuntimeError("새아침(테니스장) 시설 옵션을 찾지 못했습니다.")
-                    page.wait_for_timeout(500)
-                    court_select = page.locator("#sf_idx")
-                    if not _select_option_containing(court_select, f"{court_num}코트"):
-                        raise RuntimeError(f"{court_num}코트 옵션을 찾지 못했습니다.")
-                    page.locator("#btn_search").click(timeout=3000)
-                    _wait_calendar(page)
-
-                    court_slots = _extract_current_calendar(page, court_num)
-                    # 다음 달도 공개되어 있으면 함께 확인합니다.
-                    if _click_next_month(page):
-                        court_slots.extend(_extract_current_calendar(page, court_num))
+                    _choose_facility_and_court(page, court_num)
+                    page.wait_for_timeout(800)
+                    court_slots = _extract_slots(page, court_num)
+                    if _next_month(page):
+                        page.wait_for_timeout(700)
+                        court_slots.extend(_extract_slots(page, court_num))
                     slots.extend(court_slots)
-                    _log(f"{court_num}코트: 실제 빈자리 {len(court_slots)}개")
-
-                    # 다음 코트를 고를 때 현재 달이 바뀌어 있어도 검색 버튼이 현재 기준 달력을 다시 렌더링합니다.
+                    _log(f"{court_num}코트: 실제 빈자리 {len(court_slots)}개 / {time.monotonic()-started:.1f}초")
                 except Exception as exc:
                     error = f"새아침테니스장 {court_num}코트: {type(exc).__name__} - {exc}"
                     errors.append(error)
                     _log(f"오류: {error}")
+                    # 다음 코트는 새 페이지에서 재시도해 DOM/세션 꼬임을 격리한다.
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+                    page = context.new_page()
+                    page.set_default_timeout(min(8000, REQUEST_TIMEOUT * 1000))
             browser.close()
     except Exception as exc:
         errors.append(f"새아침테니스장: {type(exc).__name__} - {exc}")

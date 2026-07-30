@@ -254,26 +254,16 @@ def _collect_with_convex_api(page: Any, facilities: dict[int, str]) -> tuple[lis
     months = _month_keys(today, 2)
     _log(f"월별 API 조회 시작 — {', '.join(months)}")
     for month in months:
-        last_exc: Exception | None = None
-        counts = None
-        for attempt in range(1, 3):
-            try:
-                counts = _convex_query(page, MONTH_QUERY, {"month": month, "tenantSlug": TENANT_SLUG})
-                last_exc = None
-                break
-            except Exception as exc:
-                last_exc = exc
-                _log(f"달빛공원 {month} 월별 API {attempt}/2 실패: {type(exc).__name__}")
-                page.wait_for_timeout(500)
-        if last_exc is not None:
-            errors.append(f"달빛공원 {month} 월별 API: {type(last_exc).__name__} - {last_exc}")
-            continue
-        for date_raw, count in (counts or {}).items():
-            date_text = str(date_raw)
-            if date_text < today.isoformat():
-                continue
-            if isinstance(count, dict) and int(count.get("available", 0) or 0) > 0:
-                candidate_dates.add(date_text)
+        try:
+            counts = _convex_query(page, MONTH_QUERY, {"month": month, "tenantSlug": TENANT_SLUG})
+            for date_raw, count in (counts or {}).items():
+                date_text = str(date_raw)
+                if date_text < today.isoformat():
+                    continue
+                if isinstance(count, dict) and int(count.get("available", 0) or 0) > 0:
+                    candidate_dates.add(date_text)
+        except Exception as exc:
+            errors.append(f"달빛공원 {month} 월별 API: {type(exc).__name__} - {exc}")
 
     if not candidate_dates:
         _log("API 월별 조회 결과 후보 날짜 0개")
@@ -1236,7 +1226,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
                 try:
                     api_slots, api_errors = _collect_with_convex_api(page, facilities)
                     # API 호출 자체가 전부 실패한 경우에는 기존 DOM 방식으로 안전하게 복귀합니다.
-                    fatal_api = bool(api_errors) and not api_slots
+                    fatal_api = bool(api_errors) and not api_slots and len(api_errors) >= 2
                     if not fatal_api:
                         slots.extend(api_slots)
                         errors.extend(api_errors)
@@ -1294,7 +1284,7 @@ def get_songdo_slots_with_status() -> tuple[list[dict[str, Any]], list[str]]:
                     _log("facility_map 10개 완성 — 같은 검사에서 즉시 API 조회")
                     try:
                         api_slots, api_errors = _collect_with_convex_api(page, facilities)
-                        fatal_api = bool(api_errors) and not api_slots
+                        fatal_api = bool(api_errors) and not api_slots and len(api_errors) >= 2
                         if not fatal_api:
                             slots.extend(api_slots)
                             errors.extend(api_errors)
