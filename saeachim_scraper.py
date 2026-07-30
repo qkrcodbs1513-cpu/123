@@ -65,7 +65,7 @@ def _wait_select_options(page: Any, selector: str, timeout_ms: int = 15000) -> N
     page.wait_for_selector(selector, state="attached", timeout=timeout_ms)
     page.wait_for_function(
         "sel => { const e=document.querySelector(sel); return e && e.options && e.options.length > 0; }",
-        selector,
+        arg=selector,
         timeout=timeout_ms,
     )
 

@@ -269,23 +269,96 @@ def _collect_with_convex_api(page: Any, facilities: dict[int, str]) -> tuple[lis
         _log("API 월별 조회 결과 후보 날짜 0개")
         return [], errors
 
-    _log(f"API 조회: 코트 {len(facilities)}개 × 후보 날짜 {len(candidate_dates)}개")
-    for court_num, facility_id in sorted(facilities.items()):
-        for date_raw in sorted(candidate_dates):
-            try:
-                rows = _convex_query(
-                    page,
-                    SLOT_QUERY,
-                    {"date": date_raw, "facilityId": facility_id, "tenantSlug": TENANT_SLUG},
-                )
-                for raw in rows or []:
-                    if not isinstance(raw, dict):
-                        continue
-                    slot = _slot_from_api(court_num, date_raw, raw)
-                    if slot is not None:
-                        slots.append(slot)
-            except Exception as exc:
-                errors.append(f"달빛공원 {court_num}번 {date_raw} API: {type(exc).__name__} - {exc}")
+    jobs = [
+        {"courtNum": court_num, "facilityId": facility_id, "date": date_raw}
+        for court_num, facility_id in sorted(facilities.items())
+        for date_raw in sorted(candidate_dates)
+    ]
+    concurrency = max(4, min(32, int(os.getenv("DALBIT_API_CONCURRENCY", "20"))))
+    timeout_ms = max(5_000, int(REQUEST_TIMEOUT * 1000))
+    _log(
+        f"API 조회: 코트 {len(facilities)}개 × 후보 날짜 {len(candidate_dates)}개 "
+        f"(동시 {concurrency}개)"
+    )
+
+    # 기존에는 300개가 넘는 요청을 Python에서 하나씩 기다려 한 주기가 1분 이상
+    # 걸렸습니다. 같은 공개 Convex client에서 제한된 개수만 동시에 실행하여
+    # 서버에 과도한 부하를 주지 않으면서 대기 시간을 크게 줄입니다.
+    batch_result = page.evaluate(
+        """async ({queryName, tenantSlug, jobs, concurrency, timeoutMs}) => {
+          const root = document.querySelector('#__nuxt');
+          const app = root && root.__vue_app__;
+          const provided = app && app._context && app._context.provides;
+          const plugin = provided && provided['convex-vue'];
+          const client = plugin && plugin.clientRef && plugin.clientRef.value;
+          if (!client || typeof client.query !== 'function') {
+            throw new Error('Convex client unavailable');
+          }
+
+          const results = new Array(jobs.length);
+          let nextIndex = 0;
+          const runOne = async () => {
+            while (true) {
+              const index = nextIndex++;
+              if (index >= jobs.length) return;
+              const job = jobs[index];
+              let timer;
+              try {
+                const rows = await Promise.race([
+                  client.query(queryName, {
+                    date: job.date,
+                    facilityId: job.facilityId,
+                    tenantSlug,
+                  }),
+                  new Promise((_, reject) => {
+                    timer = setTimeout(
+                      () => reject(new Error(`timeout after ${timeoutMs}ms`)),
+                      timeoutMs
+                    );
+                  }),
+                ]);
+                results[index] = {ok: true, job, rows};
+              } catch (error) {
+                results[index] = {
+                  ok: false,
+                  job,
+                  error: String(error && (error.message || error) || 'unknown error'),
+                };
+              } finally {
+                if (timer) clearTimeout(timer);
+              }
+            }
+          };
+
+          await Promise.all(
+            Array.from({length: Math.min(concurrency, jobs.length)}, () => runOne())
+          );
+          return results;
+        }""",
+        {
+            "queryName": SLOT_QUERY,
+            "tenantSlug": TENANT_SLUG,
+            "jobs": jobs,
+            "concurrency": concurrency,
+            "timeoutMs": timeout_ms,
+        },
+    )
+
+    for item in batch_result or []:
+        job = item.get("job") or {}
+        court_num = int(job.get("courtNum") or 0)
+        date_raw = str(job.get("date") or "")
+        if not item.get("ok"):
+            errors.append(
+                f"달빛공원 {court_num}번 {date_raw} API: RuntimeError - {item.get('error', 'unknown error')}"
+            )
+            continue
+        for raw in item.get("rows") or []:
+            if not isinstance(raw, dict):
+                continue
+            slot = _slot_from_api(court_num, date_raw, raw)
+            if slot is not None:
+                slots.append(slot)
 
     return slots, errors
 
