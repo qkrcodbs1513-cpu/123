@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -13,9 +15,9 @@ TARGET_COURTS = (1, 2, 3, 4)
 TIME_RE = re.compile(r"(?P<sh>\d{1,2}):(?P<sm>\d{2})\s*[~\-–—]\s*(?P<eh>\d{1,2}):(?P<em>\d{2})")
 DATE_RE = re.compile(r"(?P<y>20\d{2})[.\-/년\s]+(?P<m>\d{1,2})[.\-/월\s]+(?P<d>\d{1,2})")
 
-# 실제 대관 화면은 reserve.insiseol.or.kr의 /rent/rentalSchedule 경로다.
-# 기존 res.insiseol.or.kr 및 SSO 경로는 통합예약 메인으로 되돌아가므로 사용하지 않는다.
-RES_URL = "https://reserve.insiseol.or.kr/rent/rentalSchedule?up_id=07"
+# 실제 송도공원사업단 대관 화면은 res.insiseol.or.kr에 있다.
+# reserve.insiseol.or.kr 동일 경로는 404를 반환하므로 사용하지 않는다.
+RES_URL = "https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07"
 
 
 
@@ -77,11 +79,17 @@ def _goto_schedule(page: Any) -> None:
     status = response.status if response else "no-response"
     _log(f"대관 화면 접속 — HTTP {status} / {page.url}")
 
-    # 정상 페이지는 item_info(up_id=07), main_rent_idx, sf_idx를 포함한다.
     if "/rent/rentalSchedule" not in page.url:
         raise RuntimeError(f"대관 화면이 아닌 곳으로 이동했습니다: {page.url}")
-    page.wait_for_selector("#item_info[data-up_id='07'], #main_rent_idx", state="attached", timeout=15000)
-    _wait_select_options(page, "#main_rent_idx", 15000)
+    page.wait_for_selector("#main_rent_idx", state="attached", timeout=20000)
+    # 업장 옵션은 자바스크립트 API로 늦게 채워질 수 있다.
+    try:
+        _wait_select_options(page, "#main_rent_idx", 20000)
+    except Exception as exc:
+        body = re.sub(r"\s+", " ", _body_text(page))[:500]
+        if "회원전용" in body or "회원로그인 후" in body:
+            raise RuntimeError("새아침 예약조회는 로그인 세션이 필요합니다. Railway에 SAEACHIM_AUTH_STATE를 등록해야 합니다.") from exc
+        raise RuntimeError(f"업장 목록 로딩 실패. url={page.url} body={body!r}") from exc
 
 
 def _select_by_text(page: Any, selectors: list[str], needles: list[str]) -> bool:
@@ -282,7 +290,18 @@ def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> t
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-            context = browser.new_context(locale="ko-KR", timezone_id="Asia/Seoul")
+            auth_state_raw = os.getenv("SAEACHIM_AUTH_STATE", "").strip()
+            context_kwargs = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
+            if auth_state_raw:
+                try:
+                    if auth_state_raw.startswith("{"):
+                        context_kwargs["storage_state"] = json.loads(auth_state_raw)
+                    else:
+                        context_kwargs["storage_state"] = auth_state_raw
+                    _log("저장된 로그인 세션 사용")
+                except Exception as exc:
+                    errors.append(f"새아침테니스장: SAEACHIM_AUTH_STATE 해석 실패 - {exc}")
+            context = browser.new_context(**context_kwargs)
             page = context.new_page()
             page.set_default_timeout(min(8000, REQUEST_TIMEOUT * 1000))
 
