@@ -37,6 +37,7 @@ LAST_SONGDO_TARGETS = 0
 LAST_SAEACHIM_TARGETS = 0
 LAST_NEW_COUNT = 0
 LAST_ERROR = ""
+LAST_TARGET_SLOTS: list[dict[str, Any]] = []
 START_MONOTONIC = time.monotonic()
 
 
@@ -117,6 +118,7 @@ def settings_keyboard() -> dict[str, Any]:
             {"text": "🌙 달빛 설정", "callback_data": "site_menu:songdo"},
         ],
         [{"text": "🌅 새아침 설정", "callback_data": "site_menu:saeachim"}],
+        [{"text": "🎾 현재 빈자리 보기", "callback_data": "show:slots"}],
         [
             {"text": "📊 상태", "callback_data": "show:status"},
             {"text": "🔄 새로고침", "callback_data": "show:settings"},
@@ -276,6 +278,27 @@ def send_slot_messages(header: str, slots: list[dict[str, Any]], footer: str) ->
     return all(send_telegram_message(message) for message in messages)
 
 
+def send_current_slots() -> bool:
+    with STATE_LOCK:
+        slots = [dict(slot) for slot in LAST_TARGET_SLOTS]
+        checked_at = APP_STATE.get("stats", {}).get("last_check_at") or "아직 없음"
+
+    if not slots:
+        return send_telegram_message(
+            "🎾 <b>현재 설정 조건에 맞는 빈자리가 없습니다.</b>\n\n"
+            f"마지막 검사: {escape(checked_at)}",
+            {"inline_keyboard": [[{"text": "🔄 다시 보기", "callback_data": "show:slots"}, {"text": "⚙️ 설정", "callback_data": "show:settings"}]]},
+        )
+
+    site_order = {"yeonsu": 0, "songdo": 1, "saeachim": 2}
+    slots.sort(key=lambda x: (x.get("date_raw", ""), x.get("start_hour", 0), site_order.get(x.get("site", ""), 9), x.get("court", "")))
+    return send_slot_messages(
+        f"🎾 <b>현재 빈자리 {len(slots)}개</b>\n마지막 검사: {escape(checked_at)}",
+        slots,
+        "\n/settings 에서 알림 조건을 바꿀 수 있어요.",
+    )
+
+
 def status_text() -> str:
     with STATE_LOCK:
         stats = APP_STATE["stats"].copy()
@@ -367,7 +390,7 @@ def update_slots(
 
 
 def monitor_loop() -> None:
-    global LAST_TOTAL_SLOTS, LAST_TARGET_COUNT, LAST_YEONSU_TARGETS, LAST_SONGDO_TARGETS, LAST_SAEACHIM_TARGETS, LAST_ERROR
+    global LAST_TOTAL_SLOTS, LAST_TARGET_COUNT, LAST_YEONSU_TARGETS, LAST_SONGDO_TARGETS, LAST_SAEACHIM_TARGETS, LAST_ERROR, LAST_TARGET_SLOTS
     next_heartbeat = now_kst() + timedelta(hours=HEARTBEAT_HOURS)
     error_started_at: datetime | None = None
     error_alert_sent = False
@@ -431,6 +454,8 @@ def monitor_loop() -> None:
             LAST_YEONSU_TARGETS = len(yeonsu_targets)
             LAST_SONGDO_TARGETS = len(songdo_targets)
             LAST_SAEACHIM_TARGETS = len(saeachim_targets)
+            with STATE_LOCK:
+                LAST_TARGET_SLOTS = [dict(slot) for slot in targets]
 
             with STATE_LOCK:
                 APP_STATE["stats"]["checks"] += 1
@@ -634,13 +659,21 @@ def handle_update(update: dict[str, Any]) -> None:
         data = callback.get("data", "")
         message_id = callback.get("message", {}).get("message_id")
 
+        if data == "show:slots":
+            answer_callback_query(callback["id"], "현재 빈자리를 불러왔어요.")
+            send_current_slots()
+            return
+
         if data == "show:status":
             answer_callback_query(callback["id"])
             if message_id:
                 edit_telegram_message(
                     message_id,
                     status_text(),
-                    {"inline_keyboard": [[{"text": "⚙️ 설정으로", "callback_data": "show:settings"}]]},
+                    {"inline_keyboard": [
+                        [{"text": "🎾 현재 빈자리 보기", "callback_data": "show:slots"}],
+                        [{"text": "⚙️ 설정으로", "callback_data": "show:settings"}],
+                    ]},
                 )
             return
 
@@ -709,12 +742,15 @@ def handle_update(update: dict[str, Any]) -> None:
             "/status — 상태와 통계\n"
             "/stats — 통계\n"
             "/check — 즉시 현재 상태 확인\n"
+            "/slots — 현재 빈자리 보기\n"
             "/help — 도움말"
         )
     elif command == "/settings":
         show_settings()
     elif command in {"/status", "/stats", "/check"}:
-        send_telegram_message(status_text())
+        send_telegram_message(status_text(), {"inline_keyboard": [[{"text": "🎾 현재 빈자리 보기", "callback_data": "show:slots"}]]})
+    elif command in {"/slots", "/vacancy", "/vacancies"}:
+        send_current_slots()
     else:
         send_telegram_message("명령어를 모르겠어요. /help 를 보내주세요.")
 
@@ -759,7 +795,7 @@ def main() -> None:
         ok = send_telegram_message(f"✅ <b>텔레그램 연결 정상</b>\n{now_str()}")
         raise SystemExit(0 if ok else 1)
 
-    log("START", "ChaenissBot v7.7 새아침 함수수정·달빛 병렬조회 실행")
+    log("START", "ChaenissBot v7.8 새아침 병렬조회·빈자리 버튼 실행")
     log("INFO", settings_text().replace("<b>", "").replace("</b>", "").replace("\n", " | "))
 
     command_thread = threading.Thread(

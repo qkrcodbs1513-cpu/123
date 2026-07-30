@@ -4,6 +4,8 @@ import json
 import os
 import re
 import time
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -277,15 +279,17 @@ def _next_month(page: Any) -> bool:
     return _click_text(page, ["다음 달", "다음달"])
 
 
-def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
-    courts = sorted({int(x) for x in (enabled_courts or TARGET_COURTS) if int(x) in TARGET_COURTS})
-    slots: list[dict[str, Any]] = []
-    errors: list[str] = []
+def _scrape_one_court(court_num: int) -> tuple[list[dict[str, Any]], str | None]:
+    """코트 하나를 독립 브라우저로 조회한다.
+
+    각 worker가 자기 Playwright 인스턴스를 사용하므로 sync API를 안전하게 병렬 실행할 수 있다.
+    """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        return [], ["새아침테니스장: playwright가 설치되지 않았습니다."]
+        return [], "새아침테니스장: playwright가 설치되지 않았습니다."
 
+    started = time.monotonic()
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -305,8 +309,6 @@ def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> t
                     "Chrome/150.0.0.0 Safari/537.36"
                 ),
             )
-            # 개발자도구 탐지 스크립트가 자동화 브라우저를 오인해 메인으로
-            # 돌려보내지 않도록 해당 파일만 차단하고 안전한 빈 객체를 제공한다.
             context.route("**/devtools-detector.js*", lambda route: route.abort())
             context.add_init_script(
                 """
@@ -314,60 +316,54 @@ def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> t
                 try { Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR', 'ko', 'en-US', 'en']}); } catch (_) {}
                 try { Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]}); } catch (_) {}
                 window.chrome = window.chrome || { runtime: {} };
-                window.devtoolsDetector = {
-                  addListener: function(){},
-                  launch: function(){},
-                  stop: function(){},
-                  isLaunch: function(){ return false; }
-                };
+                window.devtoolsDetector = {addListener:function(){},launch:function(){},stop:function(){},isLaunch:function(){return false;}};
                 """
             )
             page = context.new_page()
             page.on("dialog", lambda dialog: dialog.dismiss())
-            page.set_default_timeout(min(7000, REQUEST_TIMEOUT * 1000))
+            page.set_default_timeout(min(6500, REQUEST_TIMEOUT * 1000))
+            _goto_schedule(page)
+            _choose_facility_and_court(page, court_num)
+            page.wait_for_timeout(250)
+            court_slots = _extract_slots(page, court_num)
+            if _next_month(page):
+                page.wait_for_timeout(250)
+                court_slots.extend(_extract_slots(page, court_num))
+            browser.close()
+        _log(f"{court_num}코트: 실제 빈자리 {len(court_slots)}개 / {time.monotonic()-started:.1f}초")
+        return court_slots, None
+    except Exception as exc:
+        error = f"새아침테니스장 {court_num}코트: {type(exc).__name__} - {exc}"
+        _log(f"오류: {error}")
+        return [], error
 
-            # 사이트 진입은 1회만 한다. 기존 버전은 코트마다 20초씩 다시
-            # 접속해 실패 시 한 주기가 80초 이상 걸렸다.
+
+def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    courts = sorted({int(x) for x in (enabled_courts or TARGET_COURTS) if int(x) in TARGET_COURTS})
+    slots: list[dict[str, Any]] = []
+    errors: list[str] = []
+    if not courts:
+        return [], []
+
+    # 기본 4개 코트를 동시에 조회한다. Railway 메모리가 부족하면
+    # SAEACHIM_WORKERS=2로 낮출 수 있다.
+    workers = max(1, min(len(courts), int(os.getenv("SAEACHIM_WORKERS", "4"))))
+    _log(f"병렬 조회 시작 — 코트 {len(courts)}개 / 동시 {workers}개")
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="saeachim") as pool:
+        futures = {pool.submit(_scrape_one_court, court): court for court in courts}
+        for future in as_completed(futures):
+            court_num = futures[future]
             try:
-                _goto_schedule(page)
+                court_slots, error = future.result()
+                slots.extend(court_slots)
+                if error:
+                    errors.append(error)
             except Exception as exc:
-                error = f"새아침테니스장: {type(exc).__name__} - {exc}"
+                error = f"새아침테니스장 {court_num}코트: {type(exc).__name__} - {exc}"
                 errors.append(error)
                 _log(f"오류: {error}")
-                browser.close()
-                _log(f"수집 종료: 가능 슬롯 0개, 오류 1개")
-                return [], errors
-
-            for court_num in courts:
-                started = time.monotonic()
-                try:
-                    _log(f"{court_num}코트 선택 시작")
-                    _choose_facility_and_court(page, court_num)
-                    page.wait_for_timeout(350)
-                    court_slots = _extract_slots(page, court_num)
-                    if _next_month(page):
-                        page.wait_for_timeout(400)
-                        court_slots.extend(_extract_slots(page, court_num))
-                        # 다음 코트 선택 전 현재 달로 복귀
-                        try:
-                            page.locator(".btn_prev a").first.click(timeout=2000)
-                            page.wait_for_timeout(350)
-                        except Exception:
-                            pass
-                    slots.extend(court_slots)
-                    _log(f"{court_num}코트: 실제 빈자리 {len(court_slots)}개 / {time.monotonic()-started:.1f}초")
-                except Exception as exc:
-                    error = f"새아침테니스장 {court_num}코트: {type(exc).__name__} - {exc}"
-                    errors.append(error)
-                    _log(f"오류: {error}")
-                    # 한 코트 실패 때문에 사이트 전체를 재접속하지 않는다.
-                    continue
-            browser.close()
-    except Exception as exc:
-        errors.append(f"새아침테니스장: {type(exc).__name__} - {exc}")
 
     unique = {f"{s['court_code']}|{s['date_raw']}|{s['time_raw']}": s for s in slots}
     result = sorted(unique.values(), key=lambda s: (s["date_raw"], s["start_hour"], s["court_code"]))
     _log(f"수집 종료: 가능 슬롯 {len(result)}개, 오류 {len(errors)}개")
     return result, errors
-
