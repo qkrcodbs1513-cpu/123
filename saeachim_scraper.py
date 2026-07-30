@@ -4,7 +4,6 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import quote
 
 from config import REQUEST_TIMEOUT
 
@@ -14,13 +13,10 @@ TARGET_COURTS = (1, 2, 3, 4)
 TIME_RE = re.compile(r"(?P<sh>\d{1,2}):(?P<sm>\d{2})\s*[~\-–—]\s*(?P<eh>\d{1,2}):(?P<em>\d{2})")
 DATE_RE = re.compile(r"(?P<y>20\d{2})[.\-/년\s]+(?P<m>\d{1,2})[.\-/월\s]+(?P<d>\d{1,2})")
 
-# 공식 SSO 진입 주소. direct res 주소는 비로그인/세션 상태에서 reserve 메인으로 튕길 수 있다.
-SSO_URL = (
-    "https://www.insiseol.or.kr/member/memberReserveSSO.do?return_uri="
-    + quote("/login/newresSSO.do!up_id=07!return_uri=rent/rentalSchedule", safe="")
-)
-RES_URL = "https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07"
-RESERVE_URL = "https://reserve.insiseol.or.kr/"
+# 실제 대관 화면은 reserve.insiseol.or.kr의 /rent/rentalSchedule 경로다.
+# 기존 res.insiseol.or.kr 및 SSO 경로는 통합예약 메인으로 되돌아가므로 사용하지 않는다.
+RES_URL = "https://reserve.insiseol.or.kr/rent/rentalSchedule?up_id=07"
+
 
 
 def _log(message: str) -> None:
@@ -51,7 +47,7 @@ def _make_slot(court_num: int, date_raw: str, text: str) -> dict[str, Any] | Non
         "time": f"{sh:02d}:{sm:02d}~{eh:02d}:{em:02d}",
         "start_hour": sh,
         "weekday_num": date_obj.weekday(),
-        "url": SSO_URL,
+        "url": RES_URL,
     }
 
 
@@ -62,24 +58,30 @@ def _body_text(page: Any) -> str:
         return ""
 
 
+def _wait_select_options(page: Any, selector: str, timeout_ms: int = 15000) -> None:
+    page.wait_for_selector(selector, state="attached", timeout=timeout_ms)
+    page.wait_for_function(
+        "sel => { const e=document.querySelector(sel); return e && e.options && e.options.length > 0; }",
+        selector,
+        timeout=timeout_ms,
+    )
+
+
 def _goto_schedule(page: Any) -> None:
-    """SSO → 대관 페이지 순서로 진입하고, 메인으로 튕기면 한 번 복구한다."""
-    deadline = time.monotonic() + max(20, REQUEST_TIMEOUT * 2)
-    last_error: Exception | None = None
-    for url, label in ((SSO_URL, "SSO"), (RES_URL, "직접")):
-        if time.monotonic() >= deadline:
-            break
-        try:
-            response = page.goto(url, wait_until="domcontentloaded", timeout=min(15000, REQUEST_TIMEOUT * 1000))
-            page.wait_for_timeout(1200)
-            status = response.status if response else "no-response"
-            _log(f"{label} 접속 — HTTP {status} / {page.url}")
-            text = _body_text(page)
-            if "새아침" in text or "대관신청" in text or "rentalSchedule" in page.url:
-                return
-        except Exception as exc:
-            last_error = exc
-    raise RuntimeError(f"대관 화면 진입 실패 (최종 URL: {page.url})" + (f" / {last_error}" if last_error else ""))
+    """송도공원사업단 대관 달력으로 직접 진입한다."""
+    response = page.goto(
+        RES_URL,
+        wait_until="domcontentloaded",
+        timeout=min(20000, max(10000, REQUEST_TIMEOUT * 1000)),
+    )
+    status = response.status if response else "no-response"
+    _log(f"대관 화면 접속 — HTTP {status} / {page.url}")
+
+    # 정상 페이지는 item_info(up_id=07), main_rent_idx, sf_idx를 포함한다.
+    if "/rent/rentalSchedule" not in page.url:
+        raise RuntimeError(f"대관 화면이 아닌 곳으로 이동했습니다: {page.url}")
+    page.wait_for_selector("#item_info[data-up_id='07'], #main_rent_idx", state="attached", timeout=15000)
+    _wait_select_options(page, "#main_rent_idx", 15000)
 
 
 def _select_by_text(page: Any, selectors: list[str], needles: list[str]) -> bool:
@@ -138,7 +140,14 @@ def _choose_facility_and_court(page: Any, court_num: int) -> None:
 
     # 페이지가 이미 새아침 전용 화면이면 시설 선택이 없어도 통과.
     if not facility_ok and "새아침" not in _body_text(page):
-        raise RuntimeError("새아침 시설 선택 항목을 찾지 못했습니다.")
+        options = page.locator("#main_rent_idx option").all_inner_texts() if page.locator("#main_rent_idx").count() else []
+        raise RuntimeError(f"새아침 시설 선택 항목을 찾지 못했습니다. 업장옵션={options[:12]}")
+
+    # 업장 선택 후 장소 목록은 비동기로 채워진다.
+    try:
+        _wait_select_options(page, "#sf_idx", 12000)
+    except Exception:
+        pass
 
     court_needles = [f"{court_num}코트", f"{court_num} 코트", f"제{court_num}코트"]
     court_ok = _select_by_text(
@@ -147,7 +156,8 @@ def _choose_facility_and_court(page: Any, court_num: int) -> None:
         court_needles,
     ) or _click_text(page, court_needles)
     if not court_ok:
-        raise RuntimeError(f"{court_num}코트 선택 항목을 찾지 못했습니다.")
+        options = page.locator("#sf_idx option").all_inner_texts() if page.locator("#sf_idx").count() else []
+        raise RuntimeError(f"{court_num}코트 선택 항목을 찾지 못했습니다. 장소옵션={options[:20]}")
 
     # 조회/검색 버튼이 있으면 누르고, 자동 갱신형이면 그대로 진행.
     for needle in ("조회", "검색", "확인"):
