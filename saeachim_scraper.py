@@ -17,7 +17,8 @@ DATE_RE = re.compile(r"(?P<y>20\d{2})[.\-/년\s]+(?P<m>\d{1,2})[.\-/월\s]+(?P<d
 
 # 실제 송도공원사업단 대관 화면은 res.insiseol.or.kr에 있다.
 # reserve.insiseol.or.kr 동일 경로는 404를 반환하므로 사용하지 않는다.
-RES_URL = "https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07"
+BASE_URL = "https://reserve.insiseol.or.kr/"
+RES_URL = "https://reserve.insiseol.or.kr/rent/rentalSchedule?up_id=07"
 
 
 
@@ -70,26 +71,34 @@ def _wait_select_options(page: Any, selector: str, timeout_ms: int = 15000) -> N
 
 
 def _goto_schedule(page: Any) -> None:
-    """송도공원사업단 대관 달력으로 직접 진입한다."""
+    """메인 화면에서 송도공원사업단 메뉴를 눌러 대관 달력으로 진입한다.
+
+    이 사이트는 자동화 브라우저에서 대관 URL을 직접 호출하면 메인으로
+    돌려보내는 경우가 있어 실제 사용자와 같은 메뉴 이동을 사용한다.
+    """
     response = page.goto(
-        RES_URL,
+        BASE_URL,
         wait_until="domcontentloaded",
-        timeout=min(20000, max(10000, REQUEST_TIMEOUT * 1000)),
+        timeout=min(15000, max(8000, REQUEST_TIMEOUT * 1000)),
     )
     status = response.status if response else "no-response"
-    _log(f"대관 화면 접속 — HTTP {status} / {page.url}")
+    _log(f"메인 화면 접속 — HTTP {status} / {page.url}")
 
-    if "/rent/rentalSchedule" not in page.url:
+    menu = page.locator("a[href='/rent/rentalSchedule?up_id=07']").first
+    if not menu.count():
+        menu = page.get_by_role("link", name=re.compile("송도공원사업단")).first
+    if not menu.count():
+        raise RuntimeError("메인 화면에서 송도공원사업단 대관 메뉴를 찾지 못했습니다.")
+
+    with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+        menu.click(timeout=5000)
+    _log(f"대관 화면 이동 — {page.url}")
+
+    if "/rent/rentalSchedule" not in page.url or "up_id=07" not in page.url:
         raise RuntimeError(f"대관 화면이 아닌 곳으로 이동했습니다: {page.url}")
-    page.wait_for_selector("#main_rent_idx", state="attached", timeout=20000)
-    # 업장 옵션은 자바스크립트 API로 늦게 채워질 수 있다.
-    try:
-        _wait_select_options(page, "#main_rent_idx", 20000)
-    except Exception as exc:
-        body = re.sub(r"\s+", " ", _body_text(page))[:500]
-        if "회원전용" in body or "회원로그인 후" in body:
-            raise RuntimeError("새아침 예약조회는 로그인 세션이 필요합니다. Railway에 SAEACHIM_AUTH_STATE를 등록해야 합니다.") from exc
-        raise RuntimeError(f"업장 목록 로딩 실패. url={page.url} body={body!r}") from exc
+
+    page.wait_for_selector("#main_rent_idx", state="attached", timeout=10000)
+    _wait_select_options(page, "#main_rent_idx", 10000)
 
 
 def _select_by_text(page: Any, selectors: list[str], needles: list[str]) -> bool:
@@ -289,46 +298,76 @@ def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> t
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-            auth_state_raw = os.getenv("SAEACHIM_AUTH_STATE", "").strip()
-            context_kwargs = {"locale": "ko-KR", "timezone_id": "Asia/Seoul"}
-            if auth_state_raw:
-                try:
-                    if auth_state_raw.startswith("{"):
-                        context_kwargs["storage_state"] = json.loads(auth_state_raw)
-                    else:
-                        context_kwargs["storage_state"] = auth_state_raw
-                    _log("저장된 로그인 세션 사용")
-                except Exception as exc:
-                    errors.append(f"새아침테니스장: SAEACHIM_AUTH_STATE 해석 실패 - {exc}")
-            context = browser.new_context(**context_kwargs)
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+            context = browser.new_context(
+                locale="ko-KR",
+                timezone_id="Asia/Seoul",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/150.0.0.0 Safari/537.36"
+                ),
+            )
+            # 개발자도구 탐지 스크립트가 자동화 브라우저를 오인해 메인으로
+            # 돌려보내지 않도록 해당 파일만 차단하고 안전한 빈 객체를 제공한다.
+            context.route("**/share/js/devtools-detector.js", lambda route: route.abort())
+            context.add_init_script(
+                """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                window.devtoolsDetector = {
+                  addListener: function(){},
+                  launch: function(){},
+                  stop: function(){},
+                  isLaunch: function(){ return false; }
+                };
+                """
+            )
             page = context.new_page()
-            page.set_default_timeout(min(8000, REQUEST_TIMEOUT * 1000))
+            page.set_default_timeout(min(7000, REQUEST_TIMEOUT * 1000))
+
+            # 사이트 진입은 1회만 한다. 기존 버전은 코트마다 20초씩 다시
+            # 접속해 실패 시 한 주기가 80초 이상 걸렸다.
+            try:
+                _goto_schedule(page)
+            except Exception as exc:
+                error = f"새아침테니스장: {type(exc).__name__} - {exc}"
+                errors.append(error)
+                _log(f"오류: {error}")
+                browser.close()
+                _log(f"수집 종료: 가능 슬롯 0개, 오류 1개")
+                return [], errors
 
             for court_num in courts:
                 started = time.monotonic()
                 try:
-                    _goto_schedule(page)
                     _log(f"{court_num}코트 선택 시작")
                     _choose_facility_and_court(page, court_num)
-                    page.wait_for_timeout(800)
+                    page.wait_for_timeout(350)
                     court_slots = _extract_slots(page, court_num)
                     if _next_month(page):
-                        page.wait_for_timeout(700)
+                        page.wait_for_timeout(400)
                         court_slots.extend(_extract_slots(page, court_num))
+                        # 다음 코트 선택 전 현재 달로 복귀
+                        try:
+                            page.locator(".btn_prev a").first.click(timeout=2000)
+                            page.wait_for_timeout(350)
+                        except Exception:
+                            pass
                     slots.extend(court_slots)
                     _log(f"{court_num}코트: 실제 빈자리 {len(court_slots)}개 / {time.monotonic()-started:.1f}초")
                 except Exception as exc:
                     error = f"새아침테니스장 {court_num}코트: {type(exc).__name__} - {exc}"
                     errors.append(error)
                     _log(f"오류: {error}")
-                    # 다음 코트는 새 페이지에서 재시도해 DOM/세션 꼬임을 격리한다.
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-                    page = context.new_page()
-                    page.set_default_timeout(min(8000, REQUEST_TIMEOUT * 1000))
+                    # 한 코트 실패 때문에 사이트 전체를 재접속하지 않는다.
+                    continue
             browser.close()
     except Exception as exc:
         errors.append(f"새아침테니스장: {type(exc).__name__} - {exc}")
@@ -337,3 +376,4 @@ def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> t
     result = sorted(unique.values(), key=lambda s: (s["date_raw"], s["start_hour"], s["court_code"]))
     _log(f"수집 종료: 가능 슬롯 {len(result)}개, 오류 {len(errors)}개")
     return result, errors
+
