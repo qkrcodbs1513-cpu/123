@@ -17,8 +17,8 @@ DATE_RE = re.compile(r"(?P<y>20\d{2})[.\-/년\s]+(?P<m>\d{1,2})[.\-/월\s]+(?P<d
 
 # 실제 송도공원사업단 대관 화면은 res.insiseol.or.kr에 있다.
 # reserve.insiseol.or.kr 동일 경로는 404를 반환하므로 사용하지 않는다.
-BASE_URL = "https://reserve.insiseol.or.kr/"
-RES_URL = "https://reserve.insiseol.or.kr/rent/rentalSchedule?up_id=07"
+BASE_URL = "https://res.insiseol.or.kr/"
+RES_URL = "https://res.insiseol.or.kr/rent/rentalSchedule?up_id=07"
 
 
 
@@ -71,30 +71,20 @@ def _wait_select_options(page: Any, selector: str, timeout_ms: int = 15000) -> N
 
 
 def _goto_schedule(page: Any) -> None:
-    """메인 화면에서 송도공원사업단 메뉴를 눌러 대관 달력으로 진입한다.
+    """새아침 대관 달력으로 직접 진입한다.
 
-    이 사이트는 자동화 브라우저에서 대관 URL을 직접 호출하면 메인으로
-    돌려보내는 경우가 있어 실제 사용자와 같은 메뉴 이동을 사용한다.
+    사용자가 확인한 실제 공개 조회 주소는 res.insiseol.or.kr이다.
+    개발자도구 감지 스크립트는 context 단계에서 차단/무력화한다.
     """
     response = page.goto(
-        BASE_URL,
+        RES_URL,
         wait_until="domcontentloaded",
         timeout=min(15000, max(8000, REQUEST_TIMEOUT * 1000)),
     )
     status = response.status if response else "no-response"
-    _log(f"메인 화면 접속 — HTTP {status} / {page.url}")
+    _log(f"대관 화면 접속 — HTTP {status} / {page.url}")
 
-    menu = page.locator("a[href='/rent/rentalSchedule?up_id=07']").first
-    if not menu.count():
-        menu = page.get_by_role("link", name=re.compile("송도공원사업단")).first
-    if not menu.count():
-        raise RuntimeError("메인 화면에서 송도공원사업단 대관 메뉴를 찾지 못했습니다.")
-
-    with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
-        menu.click(timeout=5000)
-    _log(f"대관 화면 이동 — {page.url}")
-
-    if "/rent/rentalSchedule" not in page.url or "up_id=07" not in page.url:
+    if "res.insiseol.or.kr/rent/rentalSchedule" not in page.url or "up_id=07" not in page.url:
         raise RuntimeError(f"대관 화면이 아닌 곳으로 이동했습니다: {page.url}")
 
     page.wait_for_selector("#main_rent_idx", state="attached", timeout=10000)
@@ -317,10 +307,13 @@ def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> t
             )
             # 개발자도구 탐지 스크립트가 자동화 브라우저를 오인해 메인으로
             # 돌려보내지 않도록 해당 파일만 차단하고 안전한 빈 객체를 제공한다.
-            context.route("**/share/js/devtools-detector.js", lambda route: route.abort())
+            context.route("**/devtools-detector.js*", lambda route: route.abort())
             context.add_init_script(
                 """
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                try { Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); } catch (_) {}
+                try { Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR', 'ko', 'en-US', 'en']}); } catch (_) {}
+                try { Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]}); } catch (_) {}
+                window.chrome = window.chrome || { runtime: {} };
                 window.devtoolsDetector = {
                   addListener: function(){},
                   launch: function(){},
@@ -330,6 +323,7 @@ def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> t
                 """
             )
             page = context.new_page()
+            page.on("dialog", lambda dialog: dialog.dismiss())
             page.set_default_timeout(min(7000, REQUEST_TIMEOUT * 1000))
 
             # 사이트 진입은 1회만 한다. 기존 버전은 코트마다 20초씩 다시
