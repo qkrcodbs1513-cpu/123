@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
 import re
 import time
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -390,31 +389,14 @@ def _scrape_court_batch(courts: list[int]) -> tuple[list[dict[str, Any]], list[s
 
 def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
     courts = sorted({int(x) for x in (enabled_courts or TARGET_COURTS) if int(x) in TARGET_COURTS})
-    slots: list[dict[str, Any]] = []
-    errors: list[str] = []
     if not courts:
         return [], []
 
-    # 새아침 서버는 브라우저 4개 동시 접속 시 간헐적으로 15초 timeout이 발생했다.
-    # 기본은 2개 브라우저이며, 각 브라우저가 코트 2개를 재사용 조회한다.
-    workers = max(1, min(len(courts), int(os.getenv("SAEACHIM_WORKERS", "2"))))
-    batches: list[list[int]] = [[] for _ in range(workers)]
-    for index, court_num in enumerate(courts):
-        batches[index % workers].append(court_num)
-    batches = [batch for batch in batches if batch]
-
-    _log(f"안정 병렬 조회 시작 — 코트 {len(courts)}개 / 브라우저 {len(batches)}개 재사용")
-    with ThreadPoolExecutor(max_workers=len(batches), thread_name_prefix="saeachim") as pool:
-        futures = [pool.submit(_scrape_court_batch, batch) for batch in batches]
-        for future in as_completed(futures):
-            try:
-                batch_slots, batch_errors = future.result()
-                slots.extend(batch_slots)
-                errors.extend(batch_errors)
-            except Exception as exc:
-                error = f"새아침테니스장 worker: {type(exc).__name__} - {exc}"
-                errors.append(error)
-                _log(f"오류: {error}")
+    # 장시간 Railway 운용 안정성 우선: Chromium은 항상 1개만 생성하고
+    # 코트 1~4를 순차 조회한다. 매 호출이 끝나면 context/browser/playwright가
+    # 모두 닫히므로 다음 주기에 브라우저 프로세스가 누적되지 않는다.
+    _log(f"안정 단일브라우저 조회 시작 — 코트 {len(courts)}개 / 브라우저 1개")
+    slots, errors = _scrape_court_batch(courts)
 
     unique = {f"{s['court_code']}|{s['date_raw']}|{s['time_raw']}": s for s in slots}
     result = sorted(unique.values(), key=lambda s: (s["date_raw"], s["start_hour"], s["court_code"]))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+
 import argparse
 import threading
 import time
@@ -527,6 +529,8 @@ def monitor_loop() -> None:
                 )
                 error_alert_sent = True
 
+        # Playwright/HTTP 객체의 순환 참조가 장시간 누적되지 않도록 주기 종료 시 정리합니다.
+        gc.collect()
         elapsed = time.monotonic() - started
         time.sleep(max(1, CHECK_INTERVAL - elapsed))
 
@@ -795,7 +799,7 @@ def main() -> None:
         ok = send_telegram_message(f"✅ <b>텔레그램 연결 정상</b>\n{now_str()}")
         raise SystemExit(0 if ok else 1)
 
-    log("START", "ChaenissBot v7.9 새아침 안정 고속조회·빈자리 버튼 실행")
+    log("START", "ChaenissBot v8.0 장기안정 운용판 실행")
     log("INFO", settings_text().replace("<b>", "").replace("</b>", "").replace("\n", " | "))
 
     command_thread = threading.Thread(
