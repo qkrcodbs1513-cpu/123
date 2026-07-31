@@ -27,6 +27,11 @@ def _post(method: str, payload: dict[str, Any], retries: int = 3) -> dict[str, A
             data = response.json()
             if response.status_code == 200 and data.get("ok"):
                 return data
+            # Telegram은 동일한 본문/버튼으로 editMessageText를 호출하면 400을 반환한다.
+            # 실제 오류가 아니라 변경할 내용이 없다는 뜻이므로 성공(no-op)으로 처리한다.
+            description = str(data.get("description", "")) if isinstance(data, dict) else ""
+            if method == "editMessageText" and "message is not modified" in description.lower():
+                return {"ok": True, "result": {"unchanged": True}}
             last_error = f"HTTP {response.status_code}: {response.text[:500]}"
         except (requests.RequestException, ValueError) as exc:
             last_error = str(exc)

@@ -81,7 +81,7 @@ def _goto_schedule(page: Any) -> None:
     response = page.goto(
         RES_URL,
         wait_until="domcontentloaded",
-        timeout=min(15000, max(8000, REQUEST_TIMEOUT * 1000)),
+        timeout=min(25000, max(15000, REQUEST_TIMEOUT * 1000)),
     )
     status = response.status if response else "no-response"
     _log(f"대관 화면 접속 — HTTP {status} / {page.url}")
@@ -279,49 +279,52 @@ def _next_month(page: Any) -> bool:
     return _click_text(page, ["다음 달", "다음달"])
 
 
-def _scrape_one_court(court_num: int) -> tuple[list[dict[str, Any]], str | None]:
-    """코트 하나를 독립 브라우저로 조회한다.
+def _new_browser_context(playwright: Any) -> tuple[Any, Any]:
+    """새아침 조회용 브라우저와 context를 만든다."""
+    browser = playwright.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+        ],
+    )
+    context = browser.new_context(
+        locale="ko-KR",
+        timezone_id="Asia/Seoul",
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/150.0.0.0 Safari/537.36"
+        ),
+    )
+    context.route("**/devtools-detector.js*", lambda route: route.abort())
+    context.add_init_script(
+        """
+        try { Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); } catch (_) {}
+        try { Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR', 'ko', 'en-US', 'en']}); } catch (_) {}
+        try { Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]}); } catch (_) {}
+        window.chrome = window.chrome || { runtime: {} };
+        window.devtoolsDetector = {addListener:function(){},launch:function(){},stop:function(){},isLaunch:function(){return false;}};
+        """
+    )
+    return browser, context
 
-    각 worker가 자기 Playwright 인스턴스를 사용하므로 sync API를 안전하게 병렬 실행할 수 있다.
+
+def _scrape_court_in_context(context: Any, court_num: int) -> tuple[list[dict[str, Any]], str | None]:
+    """이미 열린 브라우저 context에서 코트 하나를 조회한다.
+
+    일시적인 페이지 접속 지연은 한 번 재시도한다. 첫 실패 결과로 빈자리가
+    사라졌다고 잘못 판단하지 않도록 최종 실패만 오류로 반환한다.
     """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return [], "새아침테니스장: playwright가 설치되지 않았습니다."
-
     started = time.monotonic()
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                ],
-            )
-            context = browser.new_context(
-                locale="ko-KR",
-                timezone_id="Asia/Seoul",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/150.0.0.0 Safari/537.36"
-                ),
-            )
-            context.route("**/devtools-detector.js*", lambda route: route.abort())
-            context.add_init_script(
-                """
-                try { Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); } catch (_) {}
-                try { Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR', 'ko', 'en-US', 'en']}); } catch (_) {}
-                try { Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]}); } catch (_) {}
-                window.chrome = window.chrome || { runtime: {} };
-                window.devtoolsDetector = {addListener:function(){},launch:function(){},stop:function(){},isLaunch:function(){return false;}};
-                """
-            )
+    last_exc: Exception | None = None
+    for attempt in (1, 2):
+        page = None
+        try:
             page = context.new_page()
             page.on("dialog", lambda dialog: dialog.dismiss())
-            page.set_default_timeout(min(6500, REQUEST_TIMEOUT * 1000))
+            page.set_default_timeout(min(9000, max(6500, REQUEST_TIMEOUT * 1000)))
             _goto_schedule(page)
             _choose_facility_and_court(page, court_num)
             page.wait_for_timeout(250)
@@ -329,13 +332,60 @@ def _scrape_one_court(court_num: int) -> tuple[list[dict[str, Any]], str | None]
             if _next_month(page):
                 page.wait_for_timeout(250)
                 court_slots.extend(_extract_slots(page, court_num))
-            browser.close()
-        _log(f"{court_num}코트: 실제 빈자리 {len(court_slots)}개 / {time.monotonic()-started:.1f}초")
-        return court_slots, None
+            elapsed = time.monotonic() - started
+            suffix = f" / 재시도 {attempt-1}회" if attempt > 1 else ""
+            _log(f"{court_num}코트: 실제 빈자리 {len(court_slots)}개 / {elapsed:.1f}초{suffix}")
+            return court_slots, None
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 1:
+                _log(f"{court_num}코트 1차 조회 지연 — 1회 재시도")
+                time.sleep(1.0)
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+
+    assert last_exc is not None
+    error = f"새아침테니스장 {court_num}코트: {type(last_exc).__name__} - {last_exc}"
+    _log(f"오류: {error}")
+    return [], error
+
+
+def _scrape_court_batch(courts: list[int]) -> tuple[list[dict[str, Any]], list[str]]:
+    """한 worker가 브라우저 하나를 재사용해 여러 코트를 순차 조회한다."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return [], ["새아침테니스장: playwright가 설치되지 않았습니다."]
+
+    slots: list[dict[str, Any]] = []
+    errors: list[str] = []
+    try:
+        with sync_playwright() as p:
+            browser, context = _new_browser_context(p)
+            try:
+                for court_num in courts:
+                    court_slots, error = _scrape_court_in_context(context, court_num)
+                    slots.extend(court_slots)
+                    if error:
+                        errors.append(error)
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                try:
+                    browser.close()
+                except Exception:
+                    pass
     except Exception as exc:
-        error = f"새아침테니스장 {court_num}코트: {type(exc).__name__} - {exc}"
-        _log(f"오류: {error}")
-        return [], error
+        # worker 자체가 죽은 경우 해당 묶음 전체를 오류로 표시한다.
+        for court_num in courts:
+            errors.append(f"새아침테니스장 {court_num}코트: {type(exc).__name__} - {exc}")
+    return slots, errors
 
 
 def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
@@ -345,21 +395,24 @@ def get_saeachim_slots_with_status(enabled_courts: list[int] | None = None) -> t
     if not courts:
         return [], []
 
-    # 기본 4개 코트를 동시에 조회한다. Railway 메모리가 부족하면
-    # SAEACHIM_WORKERS=2로 낮출 수 있다.
-    workers = max(1, min(len(courts), int(os.getenv("SAEACHIM_WORKERS", "4"))))
-    _log(f"병렬 조회 시작 — 코트 {len(courts)}개 / 동시 {workers}개")
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="saeachim") as pool:
-        futures = {pool.submit(_scrape_one_court, court): court for court in courts}
+    # 새아침 서버는 브라우저 4개 동시 접속 시 간헐적으로 15초 timeout이 발생했다.
+    # 기본은 2개 브라우저이며, 각 브라우저가 코트 2개를 재사용 조회한다.
+    workers = max(1, min(len(courts), int(os.getenv("SAEACHIM_WORKERS", "2"))))
+    batches: list[list[int]] = [[] for _ in range(workers)]
+    for index, court_num in enumerate(courts):
+        batches[index % workers].append(court_num)
+    batches = [batch for batch in batches if batch]
+
+    _log(f"안정 병렬 조회 시작 — 코트 {len(courts)}개 / 브라우저 {len(batches)}개 재사용")
+    with ThreadPoolExecutor(max_workers=len(batches), thread_name_prefix="saeachim") as pool:
+        futures = [pool.submit(_scrape_court_batch, batch) for batch in batches]
         for future in as_completed(futures):
-            court_num = futures[future]
             try:
-                court_slots, error = future.result()
-                slots.extend(court_slots)
-                if error:
-                    errors.append(error)
+                batch_slots, batch_errors = future.result()
+                slots.extend(batch_slots)
+                errors.extend(batch_errors)
             except Exception as exc:
-                error = f"새아침테니스장 {court_num}코트: {type(exc).__name__} - {exc}"
+                error = f"새아침테니스장 worker: {type(exc).__name__} - {exc}"
                 errors.append(error)
                 _log(f"오류: {error}")
 
